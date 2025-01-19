@@ -40,7 +40,7 @@ var (
 			Subsystem: VolcanoNamespace,
 			Name:      "e2e_scheduling_latency_milliseconds",
 			Help:      "E2e scheduling latency in milliseconds (scheduling algorithm + binding)",
-			Buckets:   prometheus.ExponentialBuckets(5, 2, 10),
+			Buckets:   prometheus.ExponentialBuckets(5, 2, 15),
 		},
 	)
 
@@ -62,21 +62,39 @@ var (
 		[]string{"job_name", "queue", "job_namespace"},
 	)
 
+	e2eJobSchedulingStartTime = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: VolcanoNamespace,
+			Name:      "e2e_job_scheduling_start_time",
+			Help:      "E2E job scheduling start time",
+		},
+		[]string{"job_name", "queue", "job_namespace"},
+	)
+
+	e2eJobSchedulingLastTime = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Subsystem: VolcanoNamespace,
+			Name:      "e2e_job_scheduling_last_time",
+			Help:      "E2E job scheduling last time",
+		},
+		[]string{"job_name", "queue", "job_namespace"},
+	)
+
 	pluginSchedulingLatency = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: VolcanoNamespace,
-			Name:      "plugin_scheduling_latency_microseconds",
-			Help:      "Plugin scheduling latency in microseconds",
-			Buckets:   prometheus.ExponentialBuckets(5, 2, 10),
+			Name:      "plugin_scheduling_latency_milliseconds",
+			Help:      "Plugin scheduling latency in milliseconds",
+			Buckets:   prometheus.ExponentialBuckets(5, 2, 15),
 		}, []string{"plugin", "OnSession"},
 	)
 
 	actionSchedulingLatency = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Subsystem: VolcanoNamespace,
-			Name:      "action_scheduling_latency_microseconds",
-			Help:      "Action scheduling latency in microseconds",
-			Buckets:   prometheus.ExponentialBuckets(5, 2, 10),
+			Name:      "action_scheduling_latency_milliseconds",
+			Help:      "Action scheduling latency in milliseconds",
+			Buckets:   prometheus.ExponentialBuckets(5, 2, 15),
 		}, []string{"action"},
 	)
 
@@ -85,7 +103,7 @@ var (
 			Subsystem: VolcanoNamespace,
 			Name:      "task_scheduling_latency_milliseconds",
 			Help:      "Task scheduling latency in milliseconds",
-			Buckets:   prometheus.ExponentialBuckets(5, 2, 10),
+			Buckets:   prometheus.ExponentialBuckets(5, 2, 15),
 		},
 	)
 
@@ -132,12 +150,12 @@ var (
 
 // UpdatePluginDuration updates latency for every plugin
 func UpdatePluginDuration(pluginName, onSessionStatus string, duration time.Duration) {
-	pluginSchedulingLatency.WithLabelValues(pluginName, onSessionStatus).Observe(DurationInMicroseconds(duration))
+	pluginSchedulingLatency.WithLabelValues(pluginName, onSessionStatus).Observe(DurationInMilliseconds(duration))
 }
 
 // UpdateActionDuration updates latency for every action
 func UpdateActionDuration(actionName string, duration time.Duration) {
-	actionSchedulingLatency.WithLabelValues(actionName).Observe(DurationInMicroseconds(duration))
+	actionSchedulingLatency.WithLabelValues(actionName).Observe(DurationInMilliseconds(duration))
 }
 
 // UpdateE2eDuration updates entire end to end scheduling latency
@@ -149,6 +167,16 @@ func UpdateE2eDuration(duration time.Duration) {
 func UpdateE2eSchedulingDurationByJob(jobName string, queue string, namespace string, duration time.Duration) {
 	e2eJobSchedulingDuration.WithLabelValues(jobName, queue, namespace).Set(DurationInMilliseconds(duration))
 	e2eJobSchedulingLatency.Observe(DurationInMilliseconds(duration))
+}
+
+// UpdateE2eSchedulingStartTimeByJob updates the start time of scheduling
+func UpdateE2eSchedulingStartTimeByJob(jobName string, queue string, namespace string, t time.Time) {
+	e2eJobSchedulingStartTime.WithLabelValues(jobName, queue, namespace).Set(ConvertToUnix(t))
+}
+
+// UpdateE2eSchedulingLastTimeByJob updates the last time of scheduling
+func UpdateE2eSchedulingLastTimeByJob(jobName string, queue string, namespace string, t time.Time) {
+	e2eJobSchedulingLastTime.WithLabelValues(jobName, queue, namespace).Set(ConvertToUnix(t))
 }
 
 // UpdateTaskScheduleDuration updates single task scheduling latency
@@ -199,4 +227,9 @@ func DurationInSeconds(duration time.Duration) float64 {
 // Duration get the time since specified start
 func Duration(start time.Time) time.Duration {
 	return time.Since(start)
+}
+
+// ConvertToUnix convert the time to Unix time
+func ConvertToUnix(t time.Time) float64 {
+	return float64(t.Unix())
 }

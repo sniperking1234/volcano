@@ -21,12 +21,16 @@ import (
 	"fmt"
 	"strconv"
 
-	"k8s.io/api/admission/v1beta1"
-	whv1beta1 "k8s.io/api/admissionregistration/v1beta1"
+	admissionv1 "k8s.io/api/admission/v1"
+	whv1 "k8s.io/api/admissionregistration/v1"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"volcano.sh/apis/pkg/apis/batch/v1alpha1"
+	"volcano.sh/volcano/pkg/controllers/job/plugins/distributed-framework/mpi"
+	"volcano.sh/volcano/pkg/controllers/job/plugins/distributed-framework/pytorch"
+	"volcano.sh/volcano/pkg/controllers/job/plugins/distributed-framework/tensorflow"
+	commonutil "volcano.sh/volcano/pkg/util"
 	"volcano.sh/volcano/pkg/webhooks/router"
 	"volcano.sh/volcano/pkg/webhooks/schema"
 	"volcano.sh/volcano/pkg/webhooks/util"
@@ -38,7 +42,7 @@ const (
 	// DefaultMaxRetry is the default number of retries.
 	DefaultMaxRetry = 3
 
-	defaultSchedulerName = "volcano"
+	defaultMaxRetry int32 = 3
 )
 
 func init() {
@@ -49,13 +53,15 @@ var service = &router.AdmissionService{
 	Path: "/jobs/mutate",
 	Func: Jobs,
 
-	MutatingConfig: &whv1beta1.MutatingWebhookConfiguration{
-		Webhooks: []whv1beta1.MutatingWebhook{{
+	Config: config,
+
+	MutatingConfig: &whv1.MutatingWebhookConfiguration{
+		Webhooks: []whv1.MutatingWebhook{{
 			Name: "mutatejob.volcano.sh",
-			Rules: []whv1beta1.RuleWithOperations{
+			Rules: []whv1.RuleWithOperations{
 				{
-					Operations: []whv1beta1.OperationType{whv1beta1.Create},
-					Rule: whv1beta1.Rule{
+					Operations: []whv1.OperationType{whv1.Create},
+					Rule: whv1.Rule{
 						APIGroups:   []string{"batch.volcano.sh"},
 						APIVersions: []string{"v1alpha1"},
 						Resources:   []string{"jobs"},
@@ -66,14 +72,16 @@ var service = &router.AdmissionService{
 	},
 }
 
+var config = &router.AdmissionServiceConfig{}
+
 type patchOperation struct {
 	Op    string      `json:"op"`
 	Path  string      `json:"path"`
 	Value interface{} `json:"value,omitempty"`
 }
 
-// MutateJobs mutate jobs.
-func Jobs(ar v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
+// Jobs mutate jobs.
+func Jobs(ar admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 	klog.V(3).Infof("mutating jobs")
 
 	job, err := schema.DecodeJob(ar.Request.Object, ar.Request.Resource)
@@ -83,7 +91,7 @@ func Jobs(ar v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
 
 	var patchBytes []byte
 	switch ar.Request.Operation {
-	case v1beta1.Create:
+	case admissionv1.Create:
 		patchBytes, _ = createPatch(job)
 	default:
 		err = fmt.Errorf("expect operation to be 'CREATE' ")
@@ -91,12 +99,14 @@ func Jobs(ar v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
 	}
 
 	klog.V(3).Infof("AdmissionResponse: patch=%v", string(patchBytes))
-	reviewResponse := v1beta1.AdmissionResponse{
+	reviewResponse := admissionv1.AdmissionResponse{
 		Allowed: true,
 		Patch:   patchBytes,
 	}
-	pt := v1beta1.PatchTypeJSONPatch
-	reviewResponse.PatchType = &pt
+	if len(patchBytes) > 0 {
+		pt := admissionv1.PatchTypeJSONPatch
+		reviewResponse.PatchType = &pt
+	}
 
 	return &reviewResponse
 }
@@ -115,13 +125,18 @@ func createPatch(job *v1alpha1.Job) ([]byte, error) {
 	if pathMaxRetry != nil {
 		patch = append(patch, *pathMaxRetry)
 	}
-	pathSpec := mutateSpec(job.Spec.Tasks, "/spec/tasks")
+	pathSpec := mutateSpec(job.Spec.Tasks, "/spec/tasks", job)
 	if pathSpec != nil {
 		patch = append(patch, *pathSpec)
 	}
 	pathMinAvailable := patchDefaultMinAvailable(job)
 	if pathMinAvailable != nil {
 		patch = append(patch, *pathMinAvailable)
+	}
+	// Add default plugins for some distributed-framework plugin cases
+	patchPlugins := patchDefaultPlugins(job)
+	if patchPlugins != nil {
+		patch = append(patch, *patchPlugins)
 	}
 	return json.Marshal(patch)
 }
@@ -137,7 +152,7 @@ func patchDefaultQueue(job *v1alpha1.Job) *patchOperation {
 func patchDefaultScheduler(job *v1alpha1.Job) *patchOperation {
 	// Add default scheduler name if not specified.
 	if job.Spec.SchedulerName == "" {
-		return &patchOperation{Op: "add", Path: "/spec/schedulerName", Value: defaultSchedulerName}
+		return &patchOperation{Op: "add", Path: "/spec/schedulerName", Value: commonutil.GenerateSchedulerName(config.SchedulerNames)}
 	}
 	return nil
 }
@@ -167,7 +182,11 @@ func patchDefaultMinAvailable(job *v1alpha1.Job) *patchOperation {
 	return nil
 }
 
-func mutateSpec(tasks []v1alpha1.TaskSpec, basePath string) *patchOperation {
+func mutateSpec(tasks []v1alpha1.TaskSpec, basePath string, job *v1alpha1.Job) *patchOperation {
+	// TODO: Enable this configuration when dependOn supports coexistence with the gang plugin
+	// if _, ok := job.Spec.Plugins[mpi.MpiPluginName]; ok {
+	// 	mpi.AddDependsOn(job)
+	// }
 	patched := false
 	for index := range tasks {
 		// add default task name
@@ -187,6 +206,11 @@ func mutateSpec(tasks []v1alpha1.TaskSpec, basePath string) *patchOperation {
 			minAvailable := tasks[index].Replicas
 			tasks[index].MinAvailable = &minAvailable
 		}
+
+		if tasks[index].MaxRetry == 0 {
+			patched = true
+			tasks[index].MaxRetry = defaultMaxRetry
+		}
 	}
 	if !patched {
 		return nil
@@ -195,5 +219,38 @@ func mutateSpec(tasks []v1alpha1.TaskSpec, basePath string) *patchOperation {
 		Op:    "replace",
 		Path:  basePath,
 		Value: tasks,
+	}
+}
+
+func patchDefaultPlugins(job *v1alpha1.Job) *patchOperation {
+	if job.Spec.Plugins == nil {
+		return nil
+	}
+	plugins := map[string][]string{}
+	for k, v := range job.Spec.Plugins {
+		plugins[k] = v
+	}
+
+	// Because the tensorflow-plugin, mpi-plugin and pytorch-plugin depend on svc-plugin.
+	// If the svc-plugin is not defined, we should add it.
+	_, hasTf := job.Spec.Plugins[tensorflow.TFPluginName]
+	_, hasMPI := job.Spec.Plugins[mpi.MPIPluginName]
+	_, hasPytorch := job.Spec.Plugins[pytorch.PytorchPluginName]
+	if hasTf || hasMPI || hasPytorch {
+		if _, ok := plugins["svc"]; !ok {
+			plugins["svc"] = []string{}
+		}
+	}
+
+	if _, ok := job.Spec.Plugins["mpi"]; ok {
+		if _, ok := plugins["ssh"]; !ok {
+			plugins["ssh"] = []string{}
+		}
+	}
+
+	return &patchOperation{
+		Op:    "replace",
+		Path:  "/spec/plugins",
+		Value: plugins,
 	}
 }

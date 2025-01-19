@@ -21,23 +21,22 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"time"
-
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"volcano.sh/apis/pkg/apis/helpers"
+
 	"volcano.sh/volcano/cmd/scheduler/app/options"
 	"volcano.sh/volcano/pkg/kube"
 	"volcano.sh/volcano/pkg/scheduler"
 	"volcano.sh/volcano/pkg/scheduler/framework"
-	"volcano.sh/volcano/pkg/version"
+	"volcano.sh/volcano/pkg/signals"
+	commonutil "volcano.sh/volcano/pkg/util"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	// Register gcp auth
 	_ "k8s.io/client-go/plugin/pkg/client/auth/gcp"
@@ -45,20 +44,13 @@ import (
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"
 	"k8s.io/client-go/tools/record"
-)
 
-const (
-	leaseDuration = 15 * time.Second
-	renewDeadline = 10 * time.Second
-	retryPeriod   = 5 * time.Second
+	// Register rest client metrics
+	_ "k8s.io/component-base/metrics/prometheus/restclient"
 )
 
 // Run the volcano scheduler.
 func Run(opt *options.ServerOption) error {
-	if opt.PrintVersion {
-		version.PrintVersionAndExit()
-	}
-
 	config, err := kube.BuildConfig(opt.KubeClientOptions)
 	if err != nil {
 		return err
@@ -72,31 +64,32 @@ func Run(opt *options.ServerOption) error {
 		}
 	}
 
-	sched, err := scheduler.NewScheduler(config,
-		opt.SchedulerName,
-		opt.SchedulerConf,
-		opt.SchedulePeriod,
-		opt.DefaultQueue)
+	sched, err := scheduler.NewScheduler(config, opt)
 	if err != nil {
 		panic(err)
 	}
 
-	go func() {
-		http.Handle("/metrics", promhttp.Handler())
-		klog.Fatalf("Prometheus Http Server failed %s", http.ListenAndServe(opt.ListenAddress, nil))
-	}()
-
-	if err := helpers.StartHealthz(opt.HealthzBindAddress, "volcano-scheduler"); err != nil {
-		return err
+	if opt.EnableMetrics {
+		go func() {
+			http.Handle("/metrics", commonutil.PromHandler())
+			klog.Fatalf("Prometheus Http Server failed %s", http.ListenAndServe(opt.ListenAddress, nil))
+		}()
 	}
 
+	if opt.EnableHealthz {
+		if err := helpers.StartHealthz(opt.HealthzBindAddress, "volcano-scheduler", opt.CaCertData, opt.CertData, opt.KeyData); err != nil {
+			return err
+		}
+	}
+
+	ctx := signals.SetupSignalContext()
 	run := func(ctx context.Context) {
 		sched.Run(ctx.Done())
 		<-ctx.Done()
 	}
 
-	if !opt.EnableLeaderElection {
-		run(context.TODO())
+	if !opt.LeaderElection.LeaderElect {
+		run(ctx)
 		return fmt.Errorf("finished without leader elect")
 	}
 
@@ -107,8 +100,8 @@ func Run(opt *options.ServerOption) error {
 
 	// Prepare event clients.
 	broadcaster := record.NewBroadcaster()
-	broadcaster.StartRecordingToSink(&corev1.EventSinkImpl{Interface: leaderElectionClient.CoreV1().Events(opt.LockObjectNamespace)})
-	eventRecorder := broadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: opt.SchedulerName})
+	broadcaster.StartRecordingToSink(&corev1.EventSinkImpl{Interface: leaderElectionClient.CoreV1().Events(opt.LeaderElection.ResourceNamespace)})
+	eventRecorder := broadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: commonutil.GenerateComponentName(opt.SchedulerNames)})
 
 	hostname, err := os.Hostname()
 	if err != nil {
@@ -116,10 +109,15 @@ func Run(opt *options.ServerOption) error {
 	}
 	// add a uniquifier so that two processes on the same host don't accidentally both become active
 	id := hostname + "_" + string(uuid.NewUUID())
-
-	rl, err := resourcelock.New(resourcelock.ConfigMapsResourceLock,
-		opt.LockObjectNamespace,
-		opt.SchedulerName,
+	// set ResourceNamespace value to LockObjectNamespace when it's not empty,compatible with old flag
+	//lint:ignore SA1019 LockObjectNamespace is deprecated and will be removed in a future release
+	if len(opt.LockObjectNamespace) > 0 {
+		//lint:ignore SA1019 LockObjectNamespace is deprecated and will be removed in a future release
+		opt.LeaderElection.ResourceNamespace = opt.LockObjectNamespace
+	}
+	rl, err := resourcelock.New(resourcelock.LeasesResourceLock,
+		opt.LeaderElection.ResourceNamespace,
+		opt.LeaderElection.ResourceName,
 		leaderElectionClient.CoreV1(),
 		leaderElectionClient.CoordinationV1(),
 		resourcelock.ResourceLockConfig{
@@ -130,11 +128,11 @@ func Run(opt *options.ServerOption) error {
 		return fmt.Errorf("couldn't create resource lock: %v", err)
 	}
 
-	leaderelection.RunOrDie(context.TODO(), leaderelection.LeaderElectionConfig{
+	leaderelection.RunOrDie(ctx, leaderelection.LeaderElectionConfig{
 		Lock:          rl,
-		LeaseDuration: leaseDuration,
-		RenewDeadline: renewDeadline,
-		RetryPeriod:   retryPeriod,
+		LeaseDuration: opt.LeaderElection.LeaseDuration.Duration,
+		RenewDeadline: opt.LeaderElection.RenewDeadline.Duration,
+		RetryPeriod:   opt.LeaderElection.RetryPeriod.Duration,
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStartedLeading: run,
 			OnStoppedLeading: func() {

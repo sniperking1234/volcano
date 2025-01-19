@@ -17,17 +17,18 @@ limitations under the License.
 package job
 
 import (
+	"context"
 	"encoding/json"
-	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
+	"volcano.sh/volcano/pkg/cli/util"
 
 	"github.com/spf13/cobra"
 
-	v1alpha1 "volcano.sh/apis/pkg/apis/batch/v1alpha1"
+	"volcano.sh/apis/pkg/apis/batch/v1alpha1"
 )
 
 func TestCreateJob(t *testing.T) {
@@ -45,12 +46,12 @@ func TestCreateJob(t *testing.T) {
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
-	fileName := time.Now().String() + "testCreateJob.yaml"
+	fileName := time.Now().Format("20060102150405999") + "testCreateJob.yaml"
 	val, err := json.Marshal(response)
 	if err != nil {
 		panic(err)
 	}
-	err = ioutil.WriteFile(fileName, val, os.ModePerm)
+	err = os.WriteFile(fileName, val, os.ModePerm)
 	if err != nil {
 		panic(err)
 	}
@@ -74,7 +75,7 @@ func TestCreateJob(t *testing.T) {
 
 	for i, testcase := range testCases {
 		launchJobFlags = &runFlags{
-			commonFlags: commonFlags{
+			CommonFlags: util.CommonFlags{
 				Master: server.URL,
 			},
 			Name:      "test",
@@ -82,7 +83,7 @@ func TestCreateJob(t *testing.T) {
 			Requests:  "cpu=1000m,memory=100Mi",
 		}
 
-		err := RunJob()
+		err := RunJob(context.TODO())
 		if err != nil {
 			t.Errorf("case %d (%s): expected: %v, got %v ", i, testcase.Name, testcase.ExpectValue, err)
 		}

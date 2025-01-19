@@ -15,11 +15,13 @@
 BIN_DIR=_output/bin
 RELEASE_DIR=_output/release
 REPO_PATH=volcano.sh/volcano
-IMAGE_PREFIX=volcanosh/vc
-CRD_OPTIONS ?= "crd:crdVersions=v1"
+IMAGE_PREFIX=volcanosh
+CRD_OPTIONS ?= "crd:crdVersions=v1,generateEmbeddedObjectMeta=true"
+CRD_OPTIONS_EXCLUDE_DESCRIPTION=${CRD_OPTIONS}",maxDescLen=0"
 CC ?= "gcc"
 SUPPORT_PLUGINS ?= "no"
 CRD_VERSION ?= v1
+BUILDX_OUTPUT_TYPE ?= "docker"
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -28,119 +30,123 @@ else
 GOBIN=$(shell go env GOBIN)
 endif
 
+OS=$(shell uname -s | tr '[:upper:]' '[:lower:]')
+
 # Get OS architecture
 OSARCH=$(shell uname -m)
 ifeq ($(OSARCH),x86_64)
-REL_OSARCH=linux/amd64
+GOARCH?=amd64
 else ifeq ($(OSARCH),x64)
-REL_OSARCH=linux/amd64
+GOARCH?=amd64
 else ifeq ($(OSARCH),aarch64)
-REL_OSARCH=linux/arm64
+GOARCH?=arm64
 else ifeq ($(OSARCH),aarch64_be)
-REL_OSARCH=linux/arm64
+GOARCH?=arm64
 else ifeq ($(OSARCH),armv8b)
-REL_OSARCH=linux/arm64
+GOARCH?=arm64
 else ifeq ($(OSARCH),armv8l)
-REL_OSARCH=linux/arm64
+GOARCH?=arm64
 else ifeq ($(OSARCH),i386)
-REL_OSARCH=linux/x86
+GOARCH?=x86
 else ifeq ($(OSARCH),i686)
-REL_OSARCH=linux/x86
+GOARCH?=x86
 else ifeq ($(OSARCH),arm)
-REL_OSARCH=linux/arm
+GOARCH?=arm
 else
-REL_OSARCH=linux/$(OSARCH)
+GOARCH?=$(OSARCH)
 endif
+
+# Run `make images DOCKER_PLATFORMS="linux/amd64,linux/arm64" BUILDX_OUTPUT_TYPE=registry IMAGE_PREFIX=[yourregistry]` to push multi-platform
+DOCKER_PLATFORMS ?= "linux/${GOARCH}"
+
+GOOS ?= linux
 
 include Makefile.def
 
 .EXPORT_ALL_VARIABLES:
 
-all: vc-scheduler vc-controller-manager vc-webhook-manager vcctl command-lines
+all: vc-scheduler vc-controller-manager vc-webhook-manager vc-agent vcctl command-lines
 
 init:
 	mkdir -p ${BIN_DIR}
 	mkdir -p ${RELEASE_DIR}
 
 vc-scheduler: init
-	go build -ldflags ${LD_FLAGS} -o=${BIN_DIR}/vc-scheduler ./cmd/scheduler
+	if [ ${SUPPORT_PLUGINS} = "yes" ];then\
+		CC=${CC} CGO_ENABLED=1 go build -ldflags ${LD_FLAGS} -o ${BIN_DIR}/vc-scheduler ./cmd/scheduler;\
+	else\
+		CC=${CC} CGO_ENABLED=0 go build -ldflags ${LD_FLAGS} -o ${BIN_DIR}/vc-scheduler ./cmd/scheduler;\
+	fi;
 
 vc-controller-manager: init
-	go build -ldflags ${LD_FLAGS} -o=${BIN_DIR}/vc-controller-manager ./cmd/controller-manager
+	CC=${CC} CGO_ENABLED=0 go build -ldflags ${LD_FLAGS} -o ${BIN_DIR}/vc-controller-manager ./cmd/controller-manager
 
 vc-webhook-manager: init
-	go build -ldflags ${LD_FLAGS} -o=${BIN_DIR}/vc-webhook-manager ./cmd/webhook-manager
+	CC=${CC} CGO_ENABLED=0 go build -ldflags ${LD_FLAGS} -o ${BIN_DIR}/vc-webhook-manager ./cmd/webhook-manager
+
+vc-agent: init
+	CC=${CC} CGO_ENABLED=0 go build -ldflags ${LD_FLAGS} -o ${BIN_DIR}/vc-agent ./cmd/agent
+	CC=${CC} CGO_ENABLED=0 go build -ldflags ${LD_FLAGS} -o ${BIN_DIR}/network-qos ./cmd/network-qos
 
 vcctl: init
-	go build -ldflags ${LD_FLAGS} -o=${BIN_DIR}/vcctl ./cmd/cli
+	CC=${CC} CGO_ENABLED=0 GOOS=${OS} go build -ldflags ${LD_FLAGS} -o ${BIN_DIR}/vcctl ./cmd/cli
 
-image_bins: init
-	GO111MODULE=off go get github.com/mitchellh/gox
-	CC=${CC} CGO_ENABLED=0 $(GOBIN)/gox -osarch=${REL_OSARCH} -ldflags ${LD_FLAGS} -output ${BIN_DIR}/${REL_OSARCH}/vcctl ./cmd/cli
-	for name in controller-manager webhook-manager; do\
-		CC=${CC} CGO_ENABLED=0 $(GOBIN)/gox -osarch=${REL_OSARCH} -ldflags ${LD_FLAGS} -output ${BIN_DIR}/${REL_OSARCH}/vc-$$name ./cmd/$$name; \
+image_bins: vc-scheduler vc-controller-manager vc-webhook-manager vc-agent
+
+images:
+	for name in controller-manager scheduler webhook-manager agent; do\
+		docker buildx build -t "${IMAGE_PREFIX}/vc-$$name:$(TAG)" . -f ./installer/dockerfile/$$name/Dockerfile --output=type=${BUILDX_OUTPUT_TYPE} --platform ${DOCKER_PLATFORMS} --build-arg APK_MIRROR=${APK_MIRROR} --build-arg OPEN_EULER_IMAGE_TAG=${OPEN_EULER_IMAGE_TAG}; \
 	done
-
-	if [ ${SUPPORT_PLUGINS} = "yes" ];then\
-		CC=${CC} CGO_ENABLED=1 $(GOBIN)/gox -osarch=${REL_OSARCH} -ldflags ${LD_FLAGS} -output ${BIN_DIR}/${REL_OSARCH}/vc-scheduler ./cmd/scheduler;\
-	else\
-	 	CC=${CC} CGO_ENABLED=0 $(GOBIN)/gox -osarch=${REL_OSARCH} -ldflags ${LD_FLAGS} -output ${BIN_DIR}/${REL_OSARCH}/vc-scheduler ./cmd/scheduler;\
-  	fi;
-
-images: image_bins
-	for name in controller-manager scheduler webhook-manager; do\
-		cp ${BIN_DIR}/${REL_OSARCH}/vc-$$name ./installer/dockerfile/$$name/;\
-		if [ ${REL_OSARCH} = linux/amd64 ];then\
-			docker build --no-cache -t $(IMAGE_PREFIX)-$$name:$(TAG) ./installer/dockerfile/$$name;\
-		elif [ ${REL_OSARCH} = linux/arm64 ];then\
-			docker build --no-cache -t $(IMAGE_PREFIX)-$$name-arm64:$(TAG) -f ./installer/dockerfile/$$name/Dockerfile.arm64 ./installer/dockerfile/$$name;\
-		else\
-			echo "only support x86_64 and arm64. Please build image according to your architecture";\
-		fi;\
-		rm installer/dockerfile/$$name/vc-$$name;\
-	done
-
-webhook-manager-base-image:
-	if [ ${REL_OSARCH} = linux/amd64 ];then\
-		docker build --no-cache -t $(IMAGE_PREFIX)-webhook-manager-base:$(TAG) ./installer/dockerfile/webhook-manager/ -f ./installer/dockerfile/webhook-manager/Dockerfile.base;\
-	elif [ ${REL_OSARCH} = linux/arm64 ];then\
-		docker build --no-cache -t $(IMAGE_PREFIX)-webhook-manager-base-arm64:$(TAG) ./installer/dockerfile/webhook-manager/ -f ./installer/dockerfile/webhook-manager/Dockerfile.base.arm64;\
-	else\
-		echo "only support x86_64 and arm64. Please build webhook-manager-base-image according to your architecture";\
-	fi
 
 generate-code:
 	./hack/update-gencode.sh
 
 # Generate manifests e.g. CRD, RBAC etc.
 manifests: controller-gen
-	$(CONTROLLER_GEN) $(CRD_OPTIONS) paths="./vendor/volcano.sh/apis/pkg/apis/scheduling/v1beta1;./vendor/volcano.sh/apis/pkg/apis/batch/v1alpha1;./vendor/volcano.sh/apis/pkg/apis/bus/v1alpha1;./vendor/volcano.sh/apis/pkg/apis/nodeinfo/v1alpha1" output:crd:artifacts:config=config/crd/bases
-	$(CONTROLLER_GEN) "crd:crdVersions=v1beta1" paths="./vendor/volcano.sh/apis/pkg/apis/scheduling/v1beta1;./vendor/volcano.sh/apis/pkg/apis/batch/v1alpha1;./vendor/volcano.sh/apis/pkg/apis/bus/v1alpha1;./vendor/volcano.sh/apis/pkg/apis/nodeinfo/v1alpha1" output:crd:artifacts:config=config/crd/v1beta1
+	go mod vendor
+	# volcano crd base
+	$(CONTROLLER_GEN) $(CRD_OPTIONS) paths="./vendor/volcano.sh/apis/pkg/apis/scheduling/v1beta1;./vendor/volcano.sh/apis/pkg/apis/batch/v1alpha1;./vendor/volcano.sh/apis/pkg/apis/bus/v1alpha1;./vendor/volcano.sh/apis/pkg/apis/nodeinfo/v1alpha1" output:crd:artifacts:config=config/crd/volcano/bases
+	# generate volcano job crd yaml without description to avoid yaml size limit when using `kubectl apply`
+	$(CONTROLLER_GEN) $(CRD_OPTIONS_EXCLUDE_DESCRIPTION) paths="./vendor/volcano.sh/apis/pkg/apis/batch/v1alpha1" output:crd:artifacts:config=config/crd/volcano/bases
+	# jobflow crd base
+	$(CONTROLLER_GEN) $(CRD_OPTIONS) paths="./vendor/volcano.sh/apis/pkg/apis/flow/v1alpha1" output:crd:artifacts:config=config/crd/jobflow/bases
+	# generate volcano jobflow crd yaml without description to avoid yaml size limit when using `kubectl apply`
+	$(CONTROLLER_GEN) $(CRD_OPTIONS_EXCLUDE_DESCRIPTION) paths="./vendor/volcano.sh/apis/pkg/apis/flow/v1alpha1" output:crd:artifacts:config=config/crd/jobflow/bases
 
 unit-test:
 	go clean -testcache
-	go test -p 8 -race $$(find pkg -type f -name '*_test.go' | sed -r 's|/[^/]+$$||' | sort | uniq | sed "s|^|volcano.sh/volcano/|")
+	if [ ${OS} = 'darwin' ];then\
+		go list ./... | grep -v "/e2e" | GOOS=${OS} xargs go test;\
+	else\
+		go test -p 8 -race $$(find pkg cmd -type f -name '*_test.go' | sed -r 's|/[^/]+$$||' | sort | uniq | sed "s|^|volcano.sh/volcano/|");\
+	fi;
 
-e2e:
+e2e: images
 	./hack/run-e2e-kind.sh
 
-e2e-test-schedulingbase:
+e2e-test-schedulingbase: images
 	E2E_TYPE=SCHEDULINGBASE ./hack/run-e2e-kind.sh
 
-e2e-test-schedulingaction:
+e2e-test-schedulingaction: images
 	E2E_TYPE=SCHEDULINGACTION ./hack/run-e2e-kind.sh
 
-e2e-test-jobp:
+e2e-test-jobp: images
 	E2E_TYPE=JOBP ./hack/run-e2e-kind.sh
 
-e2e-test-jobseq:
+e2e-test-jobseq: images
 	E2E_TYPE=JOBSEQ ./hack/run-e2e-kind.sh
 
-e2e-test-vcctl:
+e2e-test-vcctl: vcctl images
 	E2E_TYPE=VCCTL ./hack/run-e2e-kind.sh
+
+e2e-test-stress: images
+	E2E_TYPE=STRESS ./hack/run-e2e-kind.sh
 
 generate-yaml: init manifests
 	./hack/generate-yaml.sh TAG=${RELEASE_VER} CRD_VERSION=${CRD_VERSION}
+
+generate-charts: init manifests
+	./hack/generate-charts.sh
 
 release-env:
 	./hack/build-env.sh release
@@ -157,14 +163,12 @@ clean:
 
 verify:
 	hack/verify-gofmt.sh
-	hack/verify-golint.sh
 	hack/verify-gencode.sh
-	hack/verify-vendor.sh
-	hack/verify-vendor-licenses.sh
+    # this verify is deprecated and use make lint-licenses instead.
+	#hack/verify-vendor-licenses.sh
 
 lint: ## Lint the files
-	golangci-lint version
-	golangci-lint run pkg/kube pkg/version pkg/apis/...
+	hack/verify-golangci-lint.sh
 
 verify-generated-yaml:
 	./hack/check-generated-yaml.sh
@@ -186,7 +190,7 @@ ifeq (, $(shell which controller-gen))
 	CONTROLLER_GEN_TMP_DIR=$$(mktemp -d) ;\
 	cd $$CONTROLLER_GEN_TMP_DIR ;\
 	go mod init tmp ;\
-	go get sigs.k8s.io/controller-tools/cmd/controller-gen@v0.4.1 ;\
+	GOOS=${OS} go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.16.4 ;\
 	rm -rf $$CONTROLLER_GEN_TMP_DIR ;\
 	}
 CONTROLLER_GEN=$(GOBIN)/controller-gen
@@ -197,3 +201,26 @@ endif
 update-development-yaml:
 	make generate-yaml TAG=latest RELEASE_DIR=installer
 	mv installer/volcano-latest.yaml installer/volcano-development.yaml
+
+mod-download-go:
+	@-GOFLAGS="-mod=readonly" find -name go.mod -execdir go mod download \;
+# go mod tidy is needed with Golang 1.16+ as go mod download affects go.sum
+# https://github.com/golang/go/issues/43994
+# exclude docs folder
+	@find . -path ./docs -prune -o -name go.mod -execdir go mod tidy \;
+
+.PHONY: mirror-licenses
+mirror-licenses: mod-download-go; \
+	GOOS=${OS} go install istio.io/tools/cmd/license-lint@1.19.7; \
+	cd licenses; \
+	rm -rf `ls ./ | grep -v LICENSE`; \
+	cd -; \
+	license-lint --mirror
+
+.PHONY: lint-licenses
+lint-licenses:
+	@if test -d licenses; then license-lint --config config/license-lint.yaml; fi
+
+.PHONY: licenses-check
+licenses-check: mirror-licenses; \
+    hack/licenses-check.sh

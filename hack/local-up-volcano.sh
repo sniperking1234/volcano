@@ -16,11 +16,11 @@
 
 VK_ROOT=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/..
 CLUSTER_NAME=${CLUSTER_NAME:-volcano}
-CLUSTER_CONTEXT="--name ${CLUSTER_NAME}"
+CLUSTER_CONTEXT=("--name" "${CLUSTER_NAME}")
 KIND_OPT=${KIND_OPT:-}
 INSTALL_MODE=${INSTALL_MODE:-"kind"}
 VOLCANO_NAMESPACE=${VOLCANO_NAMESPACE:-"volcano-system"}
-IMAGE_PREFIX=volcanosh/vc
+IMAGE_PREFIX=volcanosh
 TAG=${TAG:-`git rev-parse --verify HEAD`}
 RELEASE_DIR=_output/release
 RELEASE_FOLDER=${VK_ROOT}/${RELEASE_DIR}
@@ -31,8 +31,6 @@ YAML_FILENAME=volcano-${TAG}.yaml
 function prepare {
   echo "Preparing..."
   install-helm
-  echo "Generating volcano deploy yaml"
-  make generate-yaml
 
   echo "Building docker images"
   make images
@@ -41,7 +39,10 @@ function prepare {
 
 function install-volcano {
   # TODO: add a graceful way waiting for all crd ready
-  kubectl apply -f ${RELEASE_FOLDER}/${YAML_FILENAME}
+  kubectl create namespace volcano-system 
+  helm install volcano ${VK_ROOT}/installer/helm/chart/volcano --namespace volcano-system \
+  --set basic.image_tag_version=${TAG} \
+  --set basic.image_pull_policy=IfNotPresent 
 }
 
 function uninstall-volcano {
@@ -54,8 +55,8 @@ function cleanup {
   uninstall-volcano
 
   if [ "${INSTALL_MODE}" == "kind" ]; then
-    echo "Running kind: [kind delete cluster ${CLUSTER_CONTEXT}]"
-    kind delete cluster ${CLUSTER_CONTEXT}
+    echo "Running kind: [kind delete cluster ${CLUSTER_CONTEXT[*]}]"
+    kind delete cluster "${CLUSTER_CONTEXT[@]}"
   fi
 }
 

@@ -17,10 +17,12 @@ limitations under the License.
 package api
 
 import (
-	"reflect"
+	"math"
+	"sort"
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
@@ -39,18 +41,22 @@ func TestNewResource(t *testing.T) {
 				v1.ResourceMemory:                   *resource.NewQuantity(2000, resource.BinarySI),
 				"scalar.test/" + "scalar1":          *resource.NewQuantity(1, resource.DecimalSI),
 				v1.ResourceHugePagesPrefix + "test": *resource.NewQuantity(2, resource.BinarySI),
+				v1.ResourceEphemeralStorage:         *resource.NewQuantity(3, resource.BinarySI),
 			},
 			expected: &Resource{
-				MilliCPU:        4,
-				Memory:          2000,
-				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+				MilliCPU: 4,
+				Memory:   2000,
+				ScalarResources: map[v1.ResourceName]float64{
+					"scalar.test/scalar1":       1000,
+					"hugepages-test":            2000,
+					v1.ResourceEphemeralStorage: 3000},
 			},
 		},
 	}
 
 	for _, test := range tests {
 		r := NewResource(test.resourceList)
-		if !reflect.DeepEqual(test.expected, r) {
+		if !equality.Semantic.DeepEqual(test.expected, r) {
 			t.Errorf("expected: %#v, got: %#v", test.expected, r)
 		}
 	}
@@ -89,7 +95,7 @@ func TestResourceAddScalar(t *testing.T) {
 
 	for _, test := range tests {
 		test.resource.AddScalar(test.scalarName, test.scalarQuantity)
-		if !reflect.DeepEqual(test.expected, test.resource) {
+		if !equality.Semantic.DeepEqual(test.expected, test.resource) {
 			t.Errorf("expected: %#v, got: %#v", test.expected, test.resource)
 		}
 	}
@@ -135,7 +141,7 @@ func TestSetMaxResource(t *testing.T) {
 
 	for _, test := range tests {
 		test.resource1.SetMaxResource(test.resource2)
-		if !reflect.DeepEqual(test.expected, test.resource1) {
+		if !equality.Semantic.DeepEqual(test.expected, test.resource1) {
 			t.Errorf("expected: %#v, got: %#v", test.expected, test.resource1)
 		}
 	}
@@ -174,7 +180,7 @@ func TestIsZero(t *testing.T) {
 
 	for _, test := range tests {
 		flag := test.resource.IsZero(test.resourceName)
-		if !reflect.DeepEqual(test.expected, flag) {
+		if !equality.Semantic.DeepEqual(test.expected, flag) {
 			t.Errorf("expected: %#v, got: %#v", test.expected, flag)
 		}
 	}
@@ -237,7 +243,7 @@ func TestAddResource(t *testing.T) {
 
 	for _, test := range tests {
 		test.resource1.Add(test.resource2)
-		if !reflect.DeepEqual(test.expected, test.resource1) {
+		if !equality.Semantic.DeepEqual(test.expected, test.resource1) {
 			t.Errorf("expected: %#v, got: %#v", test.expected, test.resource1)
 		}
 	}
@@ -283,13 +289,186 @@ func TestSubResource(t *testing.T) {
 
 	for _, test := range tests {
 		test.resource1.Sub(test.resource2)
-		if !reflect.DeepEqual(test.expected, test.resource1) {
+		if !equality.Semantic.DeepEqual(test.expected, test.resource1) {
 			t.Errorf("expected: %#v, got: %#v", test.expected, test.resource1)
 		}
 	}
 }
 
-func TestLessInAllDimension(t *testing.T) {
+func TestDiff(t *testing.T) {
+	testsForDefaultZero := []struct {
+		resource1         *Resource
+		resource2         *Resource
+		expectedIncreased *Resource
+		expectedDecreased *Resource
+	}{
+		{
+			resource1: &Resource{},
+			resource2: &Resource{},
+			expectedIncreased: &Resource{
+				ScalarResources: make(map[v1.ResourceName]float64, 0),
+			},
+			expectedDecreased: &Resource{
+				ScalarResources: make(map[v1.ResourceName]float64, 0),
+			},
+		},
+		{
+			resource1: &Resource{
+				MilliCPU: 1000,
+				Memory:   2000,
+			},
+			resource2: &Resource{},
+			expectedIncreased: &Resource{
+				MilliCPU:        1000,
+				Memory:          2000,
+				ScalarResources: make(map[v1.ResourceName]float64, 0),
+			},
+			expectedDecreased: &Resource{
+				ScalarResources: make(map[v1.ResourceName]float64, 0),
+			},
+		},
+		{
+			resource1: &Resource{},
+			resource2: &Resource{
+				MilliCPU: 1000,
+				Memory:   2000,
+			},
+			expectedIncreased: &Resource{
+				ScalarResources: make(map[v1.ResourceName]float64, 0),
+			},
+			expectedDecreased: &Resource{
+				MilliCPU:        1000,
+				Memory:          2000,
+				ScalarResources: make(map[v1.ResourceName]float64, 0),
+			},
+		},
+		{
+			resource1: &Resource{
+				MilliCPU:        1000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000},
+			},
+			resource2: &Resource{
+				MilliCPU: 2000,
+				Memory:   1000,
+			},
+			expectedIncreased: &Resource{
+				Memory:          1000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000},
+			},
+			expectedDecreased: &Resource{
+				MilliCPU:        1000,
+				ScalarResources: make(map[v1.ResourceName]float64, 0),
+			},
+		},
+		{
+			resource1: &Resource{
+				MilliCPU: 2000,
+				Memory:   1000,
+			},
+			resource2: &Resource{
+				MilliCPU:        1000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000},
+			},
+			expectedIncreased: &Resource{
+				MilliCPU:        1000,
+				ScalarResources: make(map[v1.ResourceName]float64, 0),
+			},
+			expectedDecreased: &Resource{
+				Memory:          1000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000},
+			},
+		},
+		{
+			resource1: &Resource{
+				MilliCPU:        1000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 3000},
+			},
+			resource2: &Resource{
+				MilliCPU:        2000,
+				Memory:          1000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000},
+			},
+			expectedIncreased: &Resource{
+				Memory:          1000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 2000},
+			},
+			expectedDecreased: &Resource{
+				MilliCPU:        1000,
+				ScalarResources: make(map[v1.ResourceName]float64, 0),
+			},
+		},
+	}
+
+	testsForDefaultInfinity := []struct {
+		resource1         *Resource
+		resource2         *Resource
+		expectedIncreased *Resource
+		expectedDecreased *Resource
+	}{
+		{
+			resource1: &Resource{
+				MilliCPU:        1000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000},
+			},
+			resource2: &Resource{
+				MilliCPU: 2000,
+				Memory:   1000,
+			},
+			expectedIncreased: &Resource{
+				Memory:          1000,
+				ScalarResources: make(map[v1.ResourceName]float64, 0),
+			},
+			expectedDecreased: &Resource{
+				MilliCPU:        1000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": -1},
+			},
+		},
+		{
+			resource1: &Resource{
+				MilliCPU: 2000,
+				Memory:   1000,
+			},
+			resource2: &Resource{
+				MilliCPU:        1000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000},
+			},
+			expectedIncreased: &Resource{
+				MilliCPU:        1000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": -1},
+			},
+			expectedDecreased: &Resource{
+				Memory:          1000,
+				ScalarResources: make(map[v1.ResourceName]float64, 0),
+			},
+		},
+	}
+
+	for _, test := range testsForDefaultZero {
+		increased, decreased := test.resource1.Diff(test.resource2, Zero)
+		if !equality.Semantic.DeepEqual(test.expectedIncreased, increased) {
+			t.Errorf("expected: %#v, got: %#v", test.expectedIncreased, increased)
+		}
+		if !equality.Semantic.DeepEqual(test.expectedDecreased, decreased) {
+			t.Errorf("expected: %#v, got: %#v", test.expectedDecreased, decreased)
+		}
+	}
+	for _, test := range testsForDefaultInfinity {
+		increased, decreased := test.resource1.Diff(test.resource2, Infinity)
+		if !equality.Semantic.DeepEqual(test.expectedIncreased, increased) {
+			t.Errorf("expected: %#v, got: %#v", test.expectedIncreased, increased)
+		}
+		if !equality.Semantic.DeepEqual(test.expectedDecreased, decreased) {
+			t.Errorf("expected: %#v, got: %#v", test.expectedDecreased, decreased)
+		}
+	}
+}
+
+func TestLess(t *testing.T) {
 	testsForDefaultZero := []struct {
 		resource1 *Resource
 		resource2 *Resource
@@ -381,23 +560,36 @@ func TestLessInAllDimension(t *testing.T) {
 			},
 			expected: false,
 		},
+		{
+			resource1: &Resource{
+				MilliCPU:        1000,
+				Memory:          1000,
+				ScalarResources: map[v1.ResourceName]float64{"hugepages-test": 2000},
+			},
+			resource2: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			expected: false,
+		},
 	}
 
-	for _, test := range testsForDefaultZero {
-		flag := test.resource1.LessInAllDimension(test.resource2, Zero)
-		if !reflect.DeepEqual(test.expected, flag) {
-			t.Errorf("expected: %#v, got: %#v", test.expected, flag)
+	for caseID, test := range testsForDefaultZero {
+		flag := test.resource1.Less(test.resource2, Zero)
+		if !equality.Semantic.DeepEqual(test.expected, flag) {
+			t.Errorf("caseID %d expected: %#v, got: %#v", caseID, test.expected, flag)
 		}
 	}
-	for _, test := range testsForDefaultInfinity {
-		flag := test.resource1.LessInAllDimension(test.resource2, Infinity)
-		if !reflect.DeepEqual(test.expected, flag) {
-			t.Errorf("expected: %#v, got: %#v", test.expected, flag)
+	for caseID, test := range testsForDefaultInfinity {
+		flag := test.resource1.Less(test.resource2, Infinity)
+		if !equality.Semantic.DeepEqual(test.expected, flag) {
+			t.Errorf("caseID %d expected: %#v, got: %#v", caseID, test.expected, flag)
 		}
 	}
 }
 
-func TestLessEqualInAllDimension(t *testing.T) {
+func TestLessEqual(t *testing.T) {
 	testsForDefaultZero := []struct {
 		resource1 *Resource
 		resource2 *Resource
@@ -521,28 +713,165 @@ func TestLessEqualInAllDimension(t *testing.T) {
 			resource2: &Resource{},
 			expected:  false,
 		},
+		{
+			resource1: &Resource{
+				MilliCPU: 4000,
+				Memory:   2000,
+			},
+			resource2: &Resource{
+				MilliCPU:        4000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			expected: false,
+		},
+		{
+			resource1: &Resource{
+				MilliCPU:        4000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			resource2: &Resource{
+				MilliCPU: 4000,
+				Memory:   2000,
+			},
+			expected: true,
+		},
 	}
 
 	for _, test := range testsForDefaultZero {
-		flag := test.resource1.LessEqualInAllDimension(test.resource2, Zero)
-		if !reflect.DeepEqual(test.expected, flag) {
+		flag := test.resource1.LessEqual(test.resource2, Zero)
+		if !equality.Semantic.DeepEqual(test.expected, flag) {
 			t.Errorf("expected: %#v, got: %#v", test.expected, flag)
 		}
 	}
-	for _, test := range testsForDefaultInfinity {
-		flag := test.resource1.LessEqualInAllDimension(test.resource2, Infinity)
-		if !reflect.DeepEqual(test.expected, flag) {
-			t.Errorf("expected: %#v, got: %#v", test.expected, flag)
+	for caseID, test := range testsForDefaultInfinity {
+		flag := test.resource1.LessEqual(test.resource2, Infinity)
+		if !equality.Semantic.DeepEqual(test.expected, flag) {
+			t.Errorf("caseID %d expected: %#v, got: %#v", caseID, test.expected, flag)
 		}
 	}
 }
 
-func TestLessInSomeDimension(t *testing.T) {
+func TestLessEqualWithDimension(t *testing.T) {
 	tests := []struct {
+		resource1 *Resource
+		resource2 *Resource
+		req       *Resource
+		expected  bool
+	}{
+		{
+			resource1: &Resource{},
+			resource2: &Resource{},
+			req:       nil,
+			expected:  true,
+		},
+		{
+			resource1: &Resource{MilliCPU: 5000},
+			resource2: &Resource{
+				MilliCPU:        4000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000},
+			},
+			req:      &Resource{MilliCPU: 1000},
+			expected: false,
+		},
+		{
+			resource1: &Resource{MilliCPU: 3000, Memory: 3000},
+			resource2: &Resource{MilliCPU: 4000, Memory: 2000},
+			req:       &Resource{Memory: 1000},
+			expected:  false,
+		},
+		{
+			resource1: &Resource{
+				MilliCPU: 4,
+				Memory:   4000,
+			},
+			resource2: &Resource{},
+			req:       &Resource{},
+			expected:  true,
+		},
+		{
+			resource1: &Resource{
+				MilliCPU: 4, Memory: 4000,
+				ScalarResources: map[v1.ResourceName]float64{"nvidia.com/gpu": 1},
+			},
+			resource2: &Resource{MilliCPU: 8, Memory: 8000},
+			req: &Resource{
+				MilliCPU: 4, Memory: 2000,
+				ScalarResources: map[v1.ResourceName]float64{"nvidia.com/gpu": 1},
+			},
+			expected: false,
+		},
+		{
+			resource1: &Resource{
+				MilliCPU: 10, Memory: 4000,
+				ScalarResources: map[v1.ResourceName]float64{"nvidia.com/gpu": 1},
+			},
+			resource2: &Resource{
+				MilliCPU: 100, Memory: 8000,
+				ScalarResources: map[v1.ResourceName]float64{"nvidia.com/A100": 1},
+			},
+			req: &Resource{
+				MilliCPU: 10, Memory: 4000,
+				ScalarResources: map[v1.ResourceName]float64{"nvidia.com/gpu": 0, "nvidia.com/A100": 1, "scalar": 1},
+			},
+			expected: true,
+		},
+		{
+			resource1: &Resource{
+				MilliCPU: 110, Memory: 4000,
+				ScalarResources: map[v1.ResourceName]float64{"nvidia.com/gpu": 1, "nvidia.com/A100": 1, "scalar": 1},
+			},
+			resource2: &Resource{
+				MilliCPU: 100, Memory: 8000,
+				ScalarResources: map[v1.ResourceName]float64{"nvidia.com/A100": 1, "scalar": 1},
+			},
+			req: &Resource{
+				Memory:          4000,
+				ScalarResources: map[v1.ResourceName]float64{"nvidia.com/gpu": 0, "nvidia.com/A100": 1, "scalar": 1},
+			},
+			expected: true,
+		},
+	}
+
+	for i, test := range tests {
+		flag := test.resource1.LessEqualWithDimension(test.resource2, test.req)
+		if !equality.Semantic.DeepEqual(test.expected, flag) {
+			t.Errorf("Case %v: expected: %#v, got: %#v", i, test.expected, flag)
+		}
+	}
+}
+
+func TestLessPartly(t *testing.T) {
+	testsForDefaultZero := []struct {
 		resource1 *Resource
 		resource2 *Resource
 		expected  bool
 	}{
+		{
+			resource1: &Resource{},
+			resource2: &Resource{},
+			expected:  false,
+		},
+		{
+			resource1: &Resource{},
+			resource2: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			expected: true,
+		},
+		{
+			resource1: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			resource2: &Resource{},
+			expected:  false,
+		},
 		{
 			resource1: &Resource{
 				MilliCPU:        2000,
@@ -623,15 +952,266 @@ func TestLessInSomeDimension(t *testing.T) {
 		},
 	}
 
-	for _, test := range tests {
-		flag := test.resource1.LessInSomeDimension(test.resource2)
-		if !reflect.DeepEqual(test.expected, flag) {
+	testsForDefaultInfinity := []struct {
+		resource1 *Resource
+		resource2 *Resource
+		expected  bool
+	}{
+		{
+			resource1: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"hugepages-test": 2000},
+			},
+			resource2: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			expected: false,
+		},
+		{
+			resource1: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			resource2: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"hugepages-test": 2000},
+			},
+			expected: true,
+		},
+	}
+
+	for caseID, test := range testsForDefaultZero {
+		flag := test.resource1.LessPartly(test.resource2, Zero)
+		if !equality.Semantic.DeepEqual(test.expected, flag) {
+			t.Errorf("caseID %d expected: %#v, got: %#v", caseID, test.expected, flag)
+		}
+	}
+	for _, test := range testsForDefaultInfinity {
+		flag := test.resource1.LessPartly(test.resource2, Infinity)
+		if !equality.Semantic.DeepEqual(test.expected, flag) {
 			t.Errorf("expected: %#v, got: %#v", test.expected, flag)
 		}
 	}
 }
 
-func TestMinDimensionResource(t *testing.T) {
+func TestLessEqualPartly(t *testing.T) {
+	testsForDefaultZero := []struct {
+		resource1 *Resource
+		resource2 *Resource
+		expected  bool
+	}{
+		{
+			resource1: &Resource{},
+			resource2: &Resource{},
+			expected:  true,
+		},
+		{
+			resource1: &Resource{},
+			resource2: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			expected: true,
+		},
+		{
+			resource1: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			resource2: &Resource{},
+			expected:  false,
+		},
+		{
+			resource1: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			resource2: &Resource{
+				MilliCPU:        4000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			expected: true,
+		},
+		{
+			resource1: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			resource2: &Resource{
+				MilliCPU:        2000,
+				Memory:          4000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			expected: true,
+		},
+		{
+			resource1: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			resource2: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 2000, "hugepages-test": 2000},
+			},
+			expected: true,
+		},
+		{
+			resource1: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"hugepages-test": 2000},
+			},
+			resource2: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			expected: true,
+		},
+		{
+			resource1: &Resource{
+				MilliCPU:        4000,
+				Memory:          4000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			resource2: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			expected: true,
+		},
+		{
+			resource1: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			resource2: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"hugepages-test": 2000},
+			},
+			expected: true,
+		},
+	}
+
+	testsForDefaultInfinity := []struct {
+		resource1 *Resource
+		resource2 *Resource
+		expected  bool
+	}{
+		{
+			resource1: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"hugepages-test": 2000},
+			},
+			resource2: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			expected: true,
+		},
+		{
+			resource1: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			resource2: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"hugepages-test": 2000},
+			},
+			expected: true,
+		},
+	}
+
+	for _, test := range testsForDefaultZero {
+		flag := test.resource1.LessEqualPartly(test.resource2, Zero)
+		if !equality.Semantic.DeepEqual(test.expected, flag) {
+			t.Errorf("expected: %#v, got: %#v", test.expected, flag)
+		}
+	}
+	for _, test := range testsForDefaultInfinity {
+		flag := test.resource1.LessEqualPartly(test.resource2, Infinity)
+		if !equality.Semantic.DeepEqual(test.expected, flag) {
+			t.Errorf("expected: %#v, got: %#v", test.expected, flag)
+		}
+	}
+}
+
+func TestEqual(t *testing.T) {
+	tests := []struct {
+		resource1 *Resource
+		resource2 *Resource
+		expected  bool
+	}{
+		{
+			resource1: &Resource{},
+			resource2: &Resource{},
+			expected:  true,
+		},
+		{
+			resource1: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{},
+			},
+			resource2: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 0},
+			},
+			expected: true,
+		},
+		{
+			resource1: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"hugepages-test": 2000},
+			},
+			resource2: &Resource{
+				MilliCPU:        2000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"hugepages-test": 2000},
+			},
+			expected: true,
+		},
+		{
+			resource1: &Resource{},
+			resource2: &Resource{
+				MilliCPU:        2000,
+				Memory:          4000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			expected: false,
+		},
+	}
+
+	for _, test := range tests {
+		flag := test.resource1.Equal(test.resource2, Zero)
+		if !equality.Semantic.DeepEqual(test.expected, flag) {
+			t.Errorf("expected: %#v, got: %#v", test.expected, flag)
+		}
+	}
+}
+
+func TestMinDimensionResourceZero(t *testing.T) {
 	tests := []struct {
 		resource1 *Resource
 		resource2 *Resource
@@ -671,12 +1251,238 @@ func TestMinDimensionResource(t *testing.T) {
 				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 0, "hugepages-test": 2000},
 			},
 		},
+		{
+			resource1: &Resource{
+				MilliCPU:        4000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1, "hugepages-test": 2},
+			},
+			resource2: &Resource{
+				MilliCPU:        3000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 0},
+			},
+			expected: &Resource{
+				MilliCPU:        3000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 0, "hugepages-test": 0},
+			},
+		},
+		{
+			resource1: &Resource{
+				MilliCPU:        4000,
+				Memory:          4000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			resource2: &Resource{
+				MilliCPU: math.MaxFloat64,
+				Memory:   2000,
+			},
+			expected: &Resource{
+				MilliCPU:        4000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 0, "hugepages-test": 0},
+			},
+		},
 	}
 
 	for _, test := range tests {
-		test.resource1.MinDimensionResource(test.resource2)
-		if !reflect.DeepEqual(test.expected, test.resource1) {
+		test.resource1.MinDimensionResource(test.resource2, Zero)
+		if !equality.Semantic.DeepEqual(test.expected, test.resource1) {
 			t.Errorf("expected: %#v, got: %#v", test.expected, test.resource1)
+		}
+	}
+}
+
+func TestMinDimensionResourceInfinity(t *testing.T) {
+	tests := []struct {
+		resource1 *Resource
+		resource2 *Resource
+		expected  *Resource
+	}{
+		{
+			resource1: &Resource{
+				MilliCPU:        4000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1, "hugepages-test": 2},
+			},
+			resource2: &Resource{
+				MilliCPU:        3000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 0},
+			},
+			expected: &Resource{
+				MilliCPU:        3000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 0, "hugepages-test": 2},
+			},
+		},
+		{
+			resource1: &Resource{
+				MilliCPU:        4000,
+				Memory:          4000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			resource2: &Resource{
+				MilliCPU: math.MaxFloat64,
+				Memory:   2000,
+			},
+			expected: &Resource{
+				MilliCPU:        4000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+		},
+	}
+
+	for _, test := range tests {
+		test.resource1.MinDimensionResource(test.resource2, Infinity)
+		if !equality.Semantic.DeepEqual(test.expected, test.resource1) {
+			t.Errorf("expected: %#v, got: %#v", test.expected, test.resource1)
+		}
+	}
+}
+
+func TestResource_LessEqualResource(t *testing.T) {
+	testsForDefaultZero := []struct {
+		resource1 *Resource
+		resource2 *Resource
+		expected  []string
+	}{
+		{
+			resource1: &Resource{},
+			resource2: &Resource{},
+			expected:  []string{},
+		},
+		{
+			resource1: &Resource{},
+			resource2: &Resource{
+				MilliCPU:        4000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			expected: []string{},
+		},
+		{
+			resource1: &Resource{
+				MilliCPU:        4000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			resource2: &Resource{},
+			expected:  []string{"cpu", "memory", "scalar.test/scalar1", "hugepages-test"},
+		},
+		{
+			resource1: &Resource{
+				MilliCPU:        4000,
+				Memory:          4000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			resource2: &Resource{
+				MilliCPU:        8000,
+				Memory:          8000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 4000, "hugepages-test": 5000},
+			},
+			expected: []string{},
+		},
+		{
+			resource1: &Resource{
+				MilliCPU:        4000,
+				Memory:          8000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			resource2: &Resource{
+				MilliCPU:        8000,
+				Memory:          8000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 4000, "hugepages-test": 5000},
+			},
+			expected: []string{},
+		},
+		{
+			resource1: &Resource{
+				MilliCPU:        4000,
+				Memory:          4000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 4000, "hugepages-test": 2000},
+			},
+			resource2: &Resource{
+				MilliCPU:        8000,
+				Memory:          8000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 4000, "hugepages-test": 5000},
+			},
+			expected: []string{},
+		},
+		{
+			resource1: &Resource{
+				MilliCPU:        4000,
+				Memory:          4000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 5000, "hugepages-test": 2000},
+			},
+			resource2: &Resource{
+				MilliCPU:        8000,
+				Memory:          8000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 4000, "hugepages-test": 5000},
+			},
+			expected: []string{"scalar.test/scalar1"},
+		},
+		{
+			resource1: &Resource{
+				MilliCPU:        9000,
+				Memory:          4000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			resource2: &Resource{
+				MilliCPU:        8000,
+				Memory:          8000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 4000, "hugepages-test": 5000},
+			},
+			expected: []string{"cpu"},
+		},
+	}
+
+	testsForDefaultInfinity := []struct {
+		resource1 *Resource
+		resource2 *Resource
+		expected  []string
+	}{
+		{
+			resource1: &Resource{},
+			resource2: &Resource{},
+			expected:  []string{},
+		},
+		{
+			resource1: &Resource{},
+			resource2: &Resource{
+				MilliCPU:        4000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			expected: []string{},
+		},
+		{
+			resource1: &Resource{
+				MilliCPU:        4000,
+				Memory:          2000,
+				ScalarResources: map[v1.ResourceName]float64{"scalar.test/scalar1": 1000, "hugepages-test": 2000},
+			},
+			resource2: &Resource{},
+			expected:  []string{"cpu", "memory"},
+		},
+	}
+
+	for _, test := range testsForDefaultZero {
+		_, reason := test.resource1.LessEqualWithResourcesName(test.resource2, Zero)
+		sort.Strings(test.expected)
+		sort.Strings(reason)
+		if !equality.Semantic.DeepEqual(test.expected, reason) {
+			t.Errorf("expected: %#v, got: %#v", test.expected, reason)
+		}
+	}
+	for caseID, test := range testsForDefaultInfinity {
+		_, reason := test.resource1.LessEqualWithResourcesName(test.resource2, Infinity)
+		sort.Strings(test.expected)
+		sort.Strings(reason)
+		if !equality.Semantic.DeepEqual(test.expected, reason) {
+			t.Errorf("caseID %d expected: %#v, got: %#v", caseID, test.expected, reason)
 		}
 	}
 }

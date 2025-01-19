@@ -1,9 +1,12 @@
 # GPU Sharing User guide
 
+## Important Note
+
+> **Note**  GPU sharing is deprecated in volcano v1.9, recommended to use the Volcano VGPU feature, which is provided by HAMI project, click [here](https://github.com/Project-HAMi/volcano-vgpu-device-plugin)
+
 ## Environment setup
 
 ### Install volcano
-
 
 #### 1. Install from source
 
@@ -14,6 +17,35 @@ After installed, update the scheduler configuration:
 ```shell script
 kubectl edit cm -n volcano-system volcano-scheduler-configmap
 ```
+
+For volcano v1.8.2+(v1.8.2 excluded), use the following configMap 
+
+```yaml
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: volcano-scheduler-configmap
+  namespace: volcano-system
+data:
+  volcano-scheduler.conf: |
+    actions: "enqueue, allocate, backfill"
+    tiers:
+    - plugins:
+      - name: priority
+      - name: gang
+      - name: conformance
+    - plugins:
+      - name: drf
+      - name: deviceshare
+        arguments:
+          deviceshare.GPUSharingEnable: true # enable gpu sharing
+      - name: predicates
+      - name: proportion
+      - name: nodeorder
+      - name: binpack
+```
+
+For volcano v1.8.2-(v1.8.2 included), use the following configMap 
 
 ```yaml
 kind: ConfigMap
@@ -39,7 +71,7 @@ data:
       - name: binpack
 ```
 
-#### 2. Install from release package.
+#### 2. Install from release package
 
 Same as above, after installed, update the scheduler configuration in `volcano-scheduler-configmap` configmap.
 
@@ -47,9 +79,11 @@ Same as above, after installed, update the scheduler configuration in `volcano-s
 
 Please refer to [volcano device plugin](https://github.com/volcano-sh/devices/blob/master/README.md#quick-start)
 
+* By default volcano device plugin supports shared GPUs, users do not need to config volcano device plugin. Default setting is the same as setting --gpu-strategy=share. For more information [volcano device plugin configuration](https://github.com/volcano-sh/devices/blob/master/doc/config.md)
+
 ### Verify environment is ready
 
-Check the node status, it is ok if `volcano.sh/gpu-memory` and `volcano.sh/gpu-number` are included in the allocatable resources. 
+Check the node status, it is ok if `volcano.sh/gpu-memory` and `volcano.sh/gpu-number` are included in the allocatable resources.
 
 ```shell script
 $ kubectl get node {node name} -oyaml
@@ -83,6 +117,7 @@ status:
 ### Running GPU Sharing Jobs
 
 NVIDIA GPUs can now be shared via container level resource requirements using the resource name `volcano.sh/gpu-memory`:
+
 ```shell script
 $ cat <<EOF | kubectl apply -f -
 apiVersion: v1
@@ -124,14 +159,14 @@ If only the above pods are claiming gpu resource in a cluster, you can see the p
 ```shell script
 $ kubectl exec -ti  gpu-pod1 env
 ...
-VOLCANO_GPU_TOTAL=11178
+VOLCANO_GPU_MEMORY_TOTAL=11178
 VOLCANO_GPU_ALLOCATED=1024
 NVIDIA_VISIBLE_DEVICES=0
 ...
 
 $ kubectl exec -ti  gpu-pod1 env
 ...
-VOLCANO_GPU_TOTAL=11178
+VOLCANO_GPU_MEMORY_TOTAL=11178
 VOLCANO_GPU_ALLOCATED=1024
 NVIDIA_VISIBLE_DEVICES=0
 ...
@@ -149,19 +184,15 @@ The GPU sharing workflow is depicted as below:
 
 ```yaml
 annotations:
-  volcano.sh/gpu-index: “0”
-  volcano.sh/predicate-time: “1593764466550835304”
+  volcano.sh/gpu-index: "0"
+  volcano.sh/predicate-time: "1593764466550835304"
 ```
 
 3. kubelet watches the pod bound to itself, and call allocate API to set env before running the container.
 
 ```yaml
 env:
-  NVIDIA_VISIBLE_DEVICES: “0” # GPU card index
-  VOLCANO_GPU_ALLOCATED: “1024” # GPU allocated
-  VOLCANO_GPU_TOTAL: “11178” # GPU memory of the card
+  NVIDIA_VISIBLE_DEVICES: "0" # GPU card index
+  VOLCANO_GPU_ALLOCATED: "1024" # GPU allocated
+  VOLCANO_GPU_MEMORY_TOTAL: "11178" # GPU memory of the card
 ```
-
-
-
-

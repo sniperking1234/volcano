@@ -17,8 +17,9 @@ limitations under the License.
 package framework
 
 import (
-	"reflect"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/api/equality"
 
 	"volcano.sh/volcano/pkg/scheduler/conf"
 )
@@ -36,15 +37,7 @@ func TestArgumentsGetInt(t *testing.T) {
 	cases := []GetIntTestCases{
 		{
 			arg: Arguments{
-				"anotherkey": "12",
-			},
-			key:         key1,
-			baseValue:   10,
-			expectValue: 10,
-		},
-		{
-			arg: Arguments{
-				key1: "15",
+				key1: 15,
 			},
 			key:         key1,
 			baseValue:   10,
@@ -100,7 +93,7 @@ func TestArgumentsGetFloat64(t *testing.T) {
 		{
 			name: "key exist",
 			arg: Arguments{
-				key1: "1.5",
+				key1: 1.5,
 			},
 			key:         key1,
 			baseValue:   1.2,
@@ -123,6 +116,15 @@ func TestArgumentsGetFloat64(t *testing.T) {
 			key:         key1,
 			baseValue:   1.2,
 			expectValue: 1.2,
+		},
+		{
+			name: "int value",
+			arg: Arguments{
+				key1: 15,
+			},
+			key:         key1,
+			baseValue:   1.2,
+			expectValue: 15,
 		},
 	}
 
@@ -147,19 +149,19 @@ func TestGetArgOfActionFromConf(t *testing.T) {
 			configurations: []conf.Configuration{
 				{
 					Name: "enqueue",
-					Arguments: map[string]string{
+					Arguments: map[string]interface{}{
 						"overCommitFactor": "1.5",
 					},
 				},
 				{
 					Name: "allocate",
-					Arguments: map[string]string{
+					Arguments: map[string]interface{}{
 						"placeholde": "placeholde",
 					},
 				},
 			},
 			action: "enqueue",
-			expectedArguments: map[string]string{
+			expectedArguments: map[string]interface{}{
 				"overCommitFactor": "1.5",
 			},
 		},
@@ -168,7 +170,7 @@ func TestGetArgOfActionFromConf(t *testing.T) {
 			configurations: []conf.Configuration{
 				{
 					Name: "enqueue",
-					Arguments: map[string]string{
+					Arguments: map[string]interface{}{
 						"overCommitFactor": "1.5",
 					},
 				},
@@ -180,7 +182,7 @@ func TestGetArgOfActionFromConf(t *testing.T) {
 
 	for index, c := range cases {
 		arg := GetArgOfActionFromConf(c.configurations, c.action)
-		if false == reflect.DeepEqual(arg, c.expectedArguments) {
+		if false == equality.Semantic.DeepEqual(arg, c.expectedArguments) {
 			t.Errorf("index %d, case %s,expected %v, but got %v", index, c.name, c.expectedArguments, arg)
 		}
 	}

@@ -19,16 +19,15 @@ package numaaware
 import (
 	"context"
 	"fmt"
-
-	"volcano.sh/volcano/pkg/scheduler/plugins/util"
+	"sync"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	v1qos "k8s.io/kubernetes/pkg/apis/core/v1/helper/qos"
 	"k8s.io/kubernetes/pkg/kubelet/cm/cpumanager/topology"
-	"k8s.io/kubernetes/pkg/kubelet/cm/cpuset"
 	"k8s.io/kubernetes/pkg/kubelet/cm/topologymanager/bitmask"
+	"k8s.io/utils/cpuset"
 
 	nodeinfov1alpha1 "volcano.sh/apis/pkg/apis/nodeinfo/v1alpha1"
 
@@ -36,6 +35,7 @@ import (
 	"volcano.sh/volcano/pkg/scheduler/framework"
 	"volcano.sh/volcano/pkg/scheduler/plugins/numaaware/policy"
 	"volcano.sh/volcano/pkg/scheduler/plugins/numaaware/provider/cpumanager"
+	"volcano.sh/volcano/pkg/scheduler/plugins/util"
 )
 
 const (
@@ -46,6 +46,7 @@ const (
 )
 
 type numaPlugin struct {
+	sync.Mutex
 	// Arguments given for the plugin
 	pluginArguments framework.Arguments
 	hintProviders   []policy.HintProvider
@@ -113,13 +114,18 @@ func (pp *numaPlugin) OnSessionOpen(ssn *framework.Session) {
 	})
 
 	predicateFn := func(task *api.TaskInfo, node *api.NodeInfo) error {
+		predicateStatus := make([]*api.Status, 0)
+		numaStatus := &api.Status{}
 		if v1qos.GetPodQOS(task.Pod) != v1.PodQOSGuaranteed {
 			klog.V(3).Infof("task %s isn't Guaranteed pod", task.Name)
 			return nil
 		}
 
 		if fit, err := filterNodeByPolicy(task, node, pp.nodeResSets); !fit {
-			return err
+			if err != nil {
+				return api.NewFitError(task, node, err.Error())
+			}
+			return nil
 		}
 
 		resNumaSets := pp.nodeResSets[node.Name].Clone()
@@ -130,8 +136,11 @@ func (pp *numaPlugin) OnSessionOpen(ssn *framework.Session) {
 			providersHints := policy.AccumulateProvidersHints(&container, node.NumaSchedulerInfo, resNumaSets, pp.hintProviders)
 			hit, admit := taskPolicy.Predicate(providersHints)
 			if !admit {
-				return fmt.Errorf("plugin %s predicates failed for task %s container %s on node %s",
-					pp.Name(), task.Name, container.Name, node.Name)
+				numaStatus.Code = api.UnschedulableAndUnresolvable
+				numaStatus.Reason = fmt.Sprintf("container %s cannot be assigned by numa", container.Name)
+				numaStatus.Plugin = PluginName
+				predicateStatus = append(predicateStatus, numaStatus)
+				return api.NewFitErrWithStatus(task, node, predicateStatus...)
 			}
 
 			klog.V(4).Infof("[numaaware] hits for task %s container '%v': %v on node %s, besthit: %v",
@@ -143,6 +152,8 @@ func (pp *numaPlugin) OnSessionOpen(ssn *framework.Session) {
 			}
 		}
 
+		pp.Lock()
+		defer pp.Unlock()
 		if _, ok := pp.assignRes[task.UID]; !ok {
 			pp.assignRes[task.UID] = make(map[string]api.ResNumaSets)
 		}
@@ -158,21 +169,18 @@ func (pp *numaPlugin) OnSessionOpen(ssn *framework.Session) {
 	ssn.AddPredicateFn(pp.Name(), predicateFn)
 
 	batchNodeOrderFn := func(task *api.TaskInfo, nodeInfo []*api.NodeInfo) (map[string]float64, error) {
+		if _, found := pp.assignRes[task.UID]; !found || task.NumaInfo == nil || task.NumaInfo.Policy == "" || task.NumaInfo.Policy == "none" {
+			return nil, nil
+		}
+
 		nodeScores := make(map[string]float64, len(nodeInfo))
-		if task.TopologyPolicy == "" || task.TopologyPolicy == "none" {
-			return nodeScores, nil
-		}
-
-		if _, found := pp.assignRes[task.UID]; !found {
-			return nodeScores, nil
-		}
-
 		scoreList := getNodeNumaNumForTask(nodeInfo, pp.assignRes[task.UID])
-		util.NormalizeScore(100, true, scoreList)
+		util.NormalizeScore(api.DefaultMaxNodeScore, true, scoreList)
 
-		for nodeName, score := range scoreList {
-			score *= int64(weight)
-			nodeScores[nodeName] = float64(score)
+		for idx, scoreNode := range scoreList {
+			scoreNode.Score *= int64(weight)
+			nodeName := nodeInfo[idx].Name
+			nodeScores[nodeName] = float64(scoreNode.Score)
 		}
 
 		klog.V(4).Infof("numa-aware plugin Score for task %s/%s is: %v",
@@ -184,7 +192,7 @@ func (pp *numaPlugin) OnSessionOpen(ssn *framework.Session) {
 }
 
 func filterNodeByPolicy(task *api.TaskInfo, node *api.NodeInfo, nodeResSets map[string]api.ResNumaSets) (fit bool, err error) {
-	if !(task.TopologyPolicy == "" || task.TopologyPolicy == "none") {
+	if !(task.NumaInfo == nil || task.NumaInfo.Policy == "" || task.NumaInfo.Policy == "none") {
 		if node.NumaSchedulerInfo == nil {
 			return false, fmt.Errorf("numa info is empty")
 		}
@@ -193,9 +201,9 @@ func filterNodeByPolicy(task *api.TaskInfo, node *api.NodeInfo, nodeResSets map[
 			return false, fmt.Errorf("cpu manager policy isn't static")
 		}
 
-		if task.TopologyPolicy != node.NumaSchedulerInfo.Policies[nodeinfov1alpha1.TopologyManagerPolicy] {
+		if task.NumaInfo.Policy != node.NumaSchedulerInfo.Policies[nodeinfov1alpha1.TopologyManagerPolicy] {
 			return false, fmt.Errorf("task topology polocy[%s] is different with node[%s]",
-				task.TopologyPolicy, node.NumaSchedulerInfo.Policies[nodeinfov1alpha1.TopologyManagerPolicy])
+				task.NumaInfo.Policy, node.NumaSchedulerInfo.Policies[nodeinfov1alpha1.TopologyManagerPolicy])
 		}
 
 		if _, ok := nodeResSets[node.Name]; !ok {
@@ -223,20 +231,23 @@ func filterNodeByPolicy(task *api.TaskInfo, node *api.NodeInfo, nodeResSets map[
 	return true, nil
 }
 
-func getNodeNumaNumForTask(nodeInfo []*api.NodeInfo, resAssignMap map[string]api.ResNumaSets) map[string]int64 {
-	nodeNumaNumMap := make(map[string]int64)
+func getNodeNumaNumForTask(nodeInfo []*api.NodeInfo, resAssignMap map[string]api.ResNumaSets) []api.ScoredNode {
+	nodeNumaCnts := make([]api.ScoredNode, len(nodeInfo))
 	workqueue.ParallelizeUntil(context.TODO(), 16, len(nodeInfo), func(index int) {
 		node := nodeInfo[index]
 		assignCpus := resAssignMap[node.Name][string(v1.ResourceCPU)]
-		nodeNumaNumMap[node.Name] = int64(getNumaNodeCntForcpuID(assignCpus, node.NumaSchedulerInfo.CPUDetail))
+		nodeNumaCnts[index] = api.ScoredNode{
+			NodeName: node.Name,
+			Score:    int64(getNumaNodeCntForCPUID(assignCpus, node.NumaSchedulerInfo.CPUDetail)),
+		}
 	})
 
-	return nodeNumaNumMap
+	return nodeNumaCnts
 }
 
-func getNumaNodeCntForcpuID(cpus cpuset.CPUSet, cpuDetails topology.CPUDetails) int {
+func getNumaNodeCntForCPUID(cpus cpuset.CPUSet, cpuDetails topology.CPUDetails) int {
 	mask, _ := bitmask.NewBitMask()
-	s := cpus.ToSlice()
+	s := cpus.List()
 
 	for _, cpuID := range s {
 		mask.Add(cpuDetails[cpuID].NUMANodeID)
@@ -267,7 +278,7 @@ func (pp *numaPlugin) OnSessionClose(ssn *framework.Session) {
 		resSet := pp.assignRes[taskID][nodeName]
 		for resName, set := range resSet {
 			if _, existed := allocatedResSet[nodeName][resName]; !existed {
-				allocatedResSet[nodeName][resName] = cpuset.NewCPUSet()
+				allocatedResSet[nodeName][resName] = cpuset.New()
 			}
 
 			allocatedResSet[nodeName][resName] = allocatedResSet[nodeName][resName].Union(set)

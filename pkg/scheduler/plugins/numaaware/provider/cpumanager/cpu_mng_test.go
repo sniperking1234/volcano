@@ -17,13 +17,15 @@ limitations under the License.
 package cpumanager
 
 import (
+	"testing"
+
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/kubernetes/pkg/kubelet/cm/cpumanager/topology"
-	"k8s.io/kubernetes/pkg/kubelet/cm/cpuset"
 	"k8s.io/kubernetes/pkg/kubelet/cm/topologymanager/bitmask"
-	"reflect"
-	"testing"
+	"k8s.io/utils/cpuset"
+
 	"volcano.sh/volcano/pkg/scheduler/api"
 	"volcano.sh/volcano/pkg/scheduler/plugins/numaaware/policy"
 )
@@ -58,7 +60,7 @@ func Test_GetTopologyHints(t *testing.T) {
 				},
 			},
 			resNumaSets: api.ResNumaSets{
-				"cpu": cpuset.NewCPUSet(0, 1, 2, 3, 4, 5, 6, 7),
+				"cpu": cpuset.New(0, 1, 2, 3, 4, 5, 6, 7),
 			},
 			expect: []policy.TopologyHint{
 				{
@@ -94,7 +96,7 @@ func Test_GetTopologyHints(t *testing.T) {
 				},
 			},
 			resNumaSets: api.ResNumaSets{
-				"cpu": cpuset.NewCPUSet(1, 2, 3, 4, 5, 6, 7),
+				"cpu": cpuset.New(1, 2, 3, 4, 5, 6, 7),
 			},
 			expect: []policy.TopologyHint{
 				{
@@ -123,7 +125,7 @@ func Test_GetTopologyHints(t *testing.T) {
 				},
 			},
 			resNumaSets: api.ResNumaSets{
-				"cpu": cpuset.NewCPUSet(0, 1, 2, 3, 4, 5, 6, 7),
+				"cpu": cpuset.New(0, 1, 2, 3, 4, 5, 6, 7),
 			},
 			expect: []policy.TopologyHint{
 				{
@@ -145,7 +147,7 @@ func Test_GetTopologyHints(t *testing.T) {
 				},
 			},
 			resNumaSets: api.ResNumaSets{
-				"cpu": cpuset.NewCPUSet(0, 1, 2, 3, 4, 5, 6, 7),
+				"cpu": cpuset.New(0, 1, 2, 3, 4, 5, 6, 7),
 			},
 			expect: []policy.TopologyHint{
 				{
@@ -167,7 +169,7 @@ func Test_GetTopologyHints(t *testing.T) {
 				},
 			},
 			resNumaSets: api.ResNumaSets{
-				"cpu": cpuset.NewCPUSet(0, 1, 2, 3, 4, 5, 6, 7),
+				"cpu": cpuset.New(0, 1, 2, 3, 4, 5, 6, 7),
 			},
 			expect: []policy.TopologyHint{},
 		},
@@ -181,7 +183,7 @@ func Test_GetTopologyHints(t *testing.T) {
 				},
 			},
 			resNumaSets: api.ResNumaSets{
-				"cpu": cpuset.NewCPUSet(2, 3, 4, 5),
+				"cpu": cpuset.New(2, 3, 4, 5),
 			},
 			expect: []policy.TopologyHint{
 				{
@@ -198,7 +200,7 @@ func Test_GetTopologyHints(t *testing.T) {
 	for _, testcase := range teseCases {
 		provider := NewProvider()
 		topologyHintmap := provider.GetTopologyHints(&testcase.container, &numaInfo, testcase.resNumaSets)
-		if !(reflect.DeepEqual(topologyHintmap["cpu"], testcase.expect) ||
+		if !(equality.Semantic.DeepEqual(topologyHintmap["cpu"], testcase.expect) ||
 			(len(topologyHintmap["cpu"]) == 0 && len(testcase.expect) == 0)) {
 			t.Errorf("%s failed. topologyHintmap = %v\n", testcase.name, topologyHintmap)
 		}
@@ -223,7 +225,7 @@ func Test_Allocate(t *testing.T) {
 				},
 			},
 			resNumaSets: api.ResNumaSets{
-				"cpu": cpuset.NewCPUSet(0, 1, 2, 3, 4, 5, 6, 7),
+				"cpu": cpuset.New(0, 1, 2, 3, 4, 5, 6, 7),
 			},
 			bestHit: &policy.TopologyHint{
 				NUMANodeAffinity: func() bitmask.BitMask {
@@ -232,7 +234,7 @@ func Test_Allocate(t *testing.T) {
 				}(),
 				Preferred: true,
 			},
-			expect: cpuset.NewCPUSet(0, 1, 2, 3),
+			expect: cpuset.New(0, 1, 2, 3),
 		},
 		{
 			name: "test-2",
@@ -244,7 +246,7 @@ func Test_Allocate(t *testing.T) {
 				},
 			},
 			resNumaSets: api.ResNumaSets{
-				"cpu": cpuset.NewCPUSet(1, 2, 3, 4, 5, 6, 7),
+				"cpu": cpuset.New(1, 2, 3, 4, 5, 6, 7),
 			},
 			bestHit: &policy.TopologyHint{
 				NUMANodeAffinity: func() bitmask.BitMask {
@@ -253,7 +255,7 @@ func Test_Allocate(t *testing.T) {
 				}(),
 				Preferred: true,
 			},
-			expect: cpuset.NewCPUSet(4, 5, 6, 7),
+			expect: cpuset.New(4, 5, 6, 7),
 		},
 		{
 			name: "test-3",
@@ -265,7 +267,7 @@ func Test_Allocate(t *testing.T) {
 				},
 			},
 			resNumaSets: api.ResNumaSets{
-				"cpu": cpuset.NewCPUSet(0, 1, 2, 3, 4, 5, 6, 7),
+				"cpu": cpuset.New(0, 1, 2, 3, 4, 5, 6, 7),
 			},
 			bestHit: &policy.TopologyHint{
 				NUMANodeAffinity: func() bitmask.BitMask {
@@ -274,7 +276,7 @@ func Test_Allocate(t *testing.T) {
 				}(),
 				Preferred: true,
 			},
-			expect: cpuset.NewCPUSet(0, 1, 2, 3, 4),
+			expect: cpuset.New(0, 1, 2, 3, 4),
 		},
 		{
 			name: "test-4",
@@ -286,7 +288,7 @@ func Test_Allocate(t *testing.T) {
 				},
 			},
 			resNumaSets: api.ResNumaSets{
-				"cpu": cpuset.NewCPUSet(1, 2, 3, 4, 5, 6, 7),
+				"cpu": cpuset.New(1, 2, 3, 4, 5, 6, 7),
 			},
 			bestHit: &policy.TopologyHint{
 				NUMANodeAffinity: func() bitmask.BitMask {
@@ -295,7 +297,7 @@ func Test_Allocate(t *testing.T) {
 				}(),
 				Preferred: true,
 			},
-			expect: cpuset.NewCPUSet(1, 4, 5, 6, 7),
+			expect: cpuset.New(1, 4, 5, 6, 7),
 		},
 		{
 			name: "test-5",
@@ -307,7 +309,7 @@ func Test_Allocate(t *testing.T) {
 				},
 			},
 			resNumaSets: api.ResNumaSets{
-				"cpu": cpuset.NewCPUSet(1, 2, 3, 4, 5, 6, 7),
+				"cpu": cpuset.New(1, 2, 3, 4, 5, 6, 7),
 			},
 			bestHit: &policy.TopologyHint{
 				NUMANodeAffinity: func() bitmask.BitMask {
@@ -316,14 +318,14 @@ func Test_Allocate(t *testing.T) {
 				}(),
 				Preferred: true,
 			},
-			expect: cpuset.NewCPUSet(),
+			expect: cpuset.New(),
 		},
 	}
 
 	for _, testcase := range teseCases {
 		provider := NewProvider()
 		assignMap := provider.Allocate(&testcase.container, testcase.bestHit, &numaInfo, testcase.resNumaSets)
-		if !(reflect.DeepEqual(assignMap["cpu"], testcase.expect)) {
+		if !(equality.Semantic.DeepEqual(assignMap["cpu"], testcase.expect)) {
 			t.Errorf("%s failed.\n", testcase.name)
 		}
 	}

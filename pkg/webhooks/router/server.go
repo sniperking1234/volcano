@@ -19,12 +19,11 @@ package router
 import (
 	"encoding/json"
 	"io"
-	"io/ioutil"
 	"net/http"
 
-	"k8s.io/api/admission/v1beta1"
+	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"volcano.sh/volcano/pkg/webhooks/schema"
 	"volcano.sh/volcano/pkg/webhooks/util"
@@ -40,7 +39,7 @@ var APPLICATIONJSON = "application/json"
 func Serve(w io.Writer, r *http.Request, admit AdmitFunc) {
 	var body []byte
 	if r.Body != nil {
-		if data, err := ioutil.ReadAll(r.Body); err == nil {
+		if data, err := io.ReadAll(r.Body); err == nil {
 			body = data
 		}
 	}
@@ -48,19 +47,19 @@ func Serve(w io.Writer, r *http.Request, admit AdmitFunc) {
 	// verify the content type is accurate
 	contentType := r.Header.Get(CONTENTTYPE)
 	if contentType != APPLICATIONJSON {
-		klog.Errorf("contentType=%s, expect application/json", contentType)
+		klog.Errorf("contentType is not application/json")
 		return
 	}
 
-	var reviewResponse *v1beta1.AdmissionResponse
-	ar := v1beta1.AdmissionReview{}
+	var reviewResponse *admissionv1.AdmissionResponse
+	ar := admissionv1.AdmissionReview{}
 	deserializer := schema.Codecs.UniversalDeserializer()
 	if _, _, err := deserializer.Decode(body, nil, &ar); err != nil {
 		reviewResponse = util.ToAdmissionResponse(err)
 	} else {
 		reviewResponse = admit(ar)
 	}
-	klog.V(3).Infof("sending response: %v", reviewResponse)
+	klog.V(5).Infof("sending response: %v", reviewResponse)
 
 	response := createResponse(reviewResponse, &ar)
 	resp, err := json.Marshal(response)
@@ -72,9 +71,11 @@ func Serve(w io.Writer, r *http.Request, admit AdmitFunc) {
 	}
 }
 
-func createResponse(reviewResponse *v1beta1.AdmissionResponse, ar *v1beta1.AdmissionReview) v1beta1.AdmissionReview {
-	response := v1beta1.AdmissionReview{}
+func createResponse(reviewResponse *admissionv1.AdmissionResponse, ar *admissionv1.AdmissionReview) admissionv1.AdmissionReview {
+	response := admissionv1.AdmissionReview{}
 	if reviewResponse != nil {
+		response.APIVersion = "admission.k8s.io/v1"
+		response.Kind = "AdmissionReview"
 		response.Response = reviewResponse
 		response.Response.UID = ar.Request.UID
 	}

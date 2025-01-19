@@ -20,7 +20,8 @@ import (
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/klog"
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/klog/v2"
 
 	"volcano.sh/apis/pkg/apis/scheduling"
 	"volcano.sh/volcano/pkg/scheduler/api"
@@ -41,11 +42,11 @@ func (enqueue *Action) Name() string {
 func (enqueue *Action) Initialize() {}
 
 func (enqueue *Action) Execute(ssn *framework.Session) {
-	klog.V(3).Infof("Enter Enqueue ...")
-	defer klog.V(3).Infof("Leaving Enqueue ...")
+	klog.V(5).Infof("Enter Enqueue ...")
+	defer klog.V(5).Infof("Leaving Enqueue ...")
 
 	queues := util.NewPriorityQueue(ssn.QueueOrderFn)
-	queueMap := map[api.QueueID]*api.QueueInfo{}
+	queueSet := sets.NewString()
 	jobsMap := map[api.QueueID]*util.PriorityQueue{}
 
 	for _, job := range ssn.Jobs {
@@ -58,19 +59,19 @@ func (enqueue *Action) Execute(ssn *framework.Session) {
 			klog.Errorf("Failed to find Queue <%s> for Job <%s/%s>",
 				job.Queue, job.Namespace, job.Name)
 			continue
-		} else if _, existed := queueMap[queue.UID]; !existed {
-			klog.V(3).Infof("Added Queue <%s> for Job <%s/%s>",
+		} else if !queueSet.Has(string(queue.UID)) {
+			klog.V(5).Infof("Added Queue <%s> for Job <%s/%s>",
 				queue.Name, job.Namespace, job.Name)
 
-			queueMap[queue.UID] = queue
+			queueSet.Insert(string(queue.UID))
 			queues.Push(queue)
 		}
 
-		if job.PodGroup.Status.Phase == scheduling.PodGroupPending {
+		if job.IsPending() {
 			if _, found := jobsMap[job.Queue]; !found {
 				jobsMap[job.Queue] = util.NewPriorityQueue(ssn.JobOrderFn)
 			}
-			klog.V(3).Infof("Added Job <%s/%s> into Queue <%s>", job.Namespace, job.Name, job.Queue)
+			klog.V(5).Infof("Added Job <%s/%s> into Queue <%s>", job.Namespace, job.Name, job.Queue)
 			jobsMap[job.Queue].Push(job)
 		}
 	}
@@ -84,7 +85,7 @@ func (enqueue *Action) Execute(ssn *framework.Session) {
 
 		queue := queues.Pop().(*api.QueueInfo)
 
-		// Found "high" priority job
+		// skip the Queue that has no pending job
 		jobs, found := jobsMap[queue.UID]
 		if !found || jobs.Empty() {
 			continue
@@ -92,6 +93,7 @@ func (enqueue *Action) Execute(ssn *framework.Session) {
 		job := jobs.Pop().(*api.JobInfo)
 
 		if job.PodGroup.Spec.MinResources == nil || ssn.JobEnqueueable(job) {
+			ssn.JobEnqueued(job)
 			job.PodGroup.Status.Phase = scheduling.PodGroupInqueue
 			ssn.Jobs[job.UID] = job
 		}

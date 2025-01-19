@@ -25,12 +25,12 @@ import (
 
 	lagencyerror "errors"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/core/v1"
-	schedv1 "k8s.io/api/scheduling/v1beta1"
+	schedv1 "k8s.io/api/scheduling/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -39,6 +39,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	vcclient "volcano.sh/apis/pkg/client/clientset/versioned"
+
 	"volcano.sh/volcano/pkg/controllers/job/helpers"
 	schedulerapi "volcano.sh/volcano/pkg/scheduler/api"
 )
@@ -47,6 +48,7 @@ var (
 	OneMinute  = 1 * time.Minute
 	TwoMinute  = 2 * time.Minute
 	FiveMinute = 5 * time.Minute
+	TenMinute  = 10 * time.Minute
 	OneCPU     = v1.ResourceList{"cpu": resource.MustParse("1000m")}
 	TwoCPU     = v1.ResourceList{"cpu": resource.MustParse("2000m")}
 	ThreeCPU   = v1.ResourceList{"cpu": resource.MustParse("3000m")}
@@ -67,16 +69,20 @@ const (
 	SchedulerName                = "volcano"
 	ExecuteAction                = "ExecuteAction"
 	DefaultQueue                 = "default"
+	NumStress                    = 10
 )
 
 const (
-	DefaultBusyBoxImage = "busybox:1.24"
-	DefaultNginxImage   = "nginx:1.14"
-	DefaultMPIImage     = "volcanosh/example-mpi:0.0.1"
+	DefaultBusyBoxImage = "busybox"
+	DefaultNginxImage   = "nginx"
+	DefaultMPIImage     = "volcanosh/example-mpi:0.0.3"
 	DefaultTFImage      = "volcanosh/dist-mnist-tf-example:0.0.1"
+	// "volcanosh/pytorch-mnist-v1beta1-9ee8fda-example:0.0.1" is from "docker.io/kubeflowkatib/pytorch-mnist:v1beta1-9ee8fda"
+	DefaultPytorchImage = "volcanosh/pytorch-mnist-v1beta1-9ee8fda-example:0.0.1"
+	LogTimeFormat       = "[ 2006/01/02 15:04:05.000 ]"
 )
 
-func CpuResource(request string) v1.ResourceList {
+func CPUResource(request string) v1.ResourceList {
 	return v1.ResourceList{v1.ResourceCPU: resource.MustParse(request)}
 }
 
@@ -115,6 +121,8 @@ type TestContext struct {
 
 	Namespace        string
 	Queues           []string
+	DeservedResource map[string]v1.ResourceList
+	QueueParent      map[string]string
 	PriorityClasses  map[string]int32
 	UsingPlaceHolder bool
 }
@@ -122,6 +130,8 @@ type TestContext struct {
 type Options struct {
 	Namespace          string
 	Queues             []string
+	DeservedResource   map[string]v1.ResourceList
+	QueueParent        map[string]string
 	PriorityClasses    map[string]int32
 	NodesNumLimit      int
 	NodesResourceLimit v1.ResourceList
@@ -139,6 +149,8 @@ func InitTestContext(o Options) *TestContext {
 	ctx := &TestContext{
 		Namespace:        o.Namespace,
 		Queues:           o.Queues,
+		DeservedResource: o.DeservedResource,
+		QueueParent:      o.QueueParent,
 		PriorityClasses:  o.PriorityClasses,
 		Vcclient:         VcClient,
 		Kubeclient:       KubeClient,
@@ -212,7 +224,7 @@ func CleanupTestContext(ctx *TestContext) {
 
 func createPriorityClasses(cxt *TestContext) {
 	for name, value := range cxt.PriorityClasses {
-		_, err := cxt.Kubeclient.SchedulingV1beta1().PriorityClasses().Create(context.TODO(),
+		_, err := cxt.Kubeclient.SchedulingV1().PriorityClasses().Create(context.TODO(),
 			&schedv1.PriorityClass{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: name,
@@ -227,7 +239,7 @@ func createPriorityClasses(cxt *TestContext) {
 
 func deletePriorityClasses(cxt *TestContext) {
 	for name := range cxt.PriorityClasses {
-		err := cxt.Kubeclient.SchedulingV1beta1().PriorityClasses().Delete(context.TODO(), name, metav1.DeleteOptions{})
+		err := cxt.Kubeclient.SchedulingV1().PriorityClasses().Delete(context.TODO(), name, metav1.DeleteOptions{})
 		Expect(err).NotTo(HaveOccurred())
 	}
 }

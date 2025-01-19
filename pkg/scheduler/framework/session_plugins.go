@@ -17,10 +17,12 @@ limitations under the License.
 package framework
 
 import (
-	k8sframework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
+	k8sframework "k8s.io/kubernetes/pkg/scheduler/framework"
 
 	"volcano.sh/apis/pkg/apis/scheduling"
+	"volcano.sh/volcano/pkg/controllers/job/helpers"
 	"volcano.sh/volcano/pkg/scheduler/api"
+	"volcano.sh/volcano/pkg/scheduler/util"
 )
 
 // AddJobOrderFn add job order function
@@ -33,6 +35,11 @@ func (ssn *Session) AddQueueOrderFn(name string, qf api.CompareFn) {
 	ssn.queueOrderFns[name] = qf
 }
 
+// AddVictimQueueOrderFn add victim job order function
+func (ssn *Session) AddVictimQueueOrderFn(name string, vcf api.VictimCompareFn) {
+	ssn.victimQueueOrderFns[name] = vcf
+}
+
 // AddClusterOrderFn add queue order function
 func (ssn *Session) AddClusterOrderFn(name string, qf api.CompareFn) {
 	ssn.clusterOrderFns[name] = qf
@@ -41,11 +48,6 @@ func (ssn *Session) AddClusterOrderFn(name string, qf api.CompareFn) {
 // AddTaskOrderFn add task order function
 func (ssn *Session) AddTaskOrderFn(name string, cf api.CompareFn) {
 	ssn.taskOrderFns[name] = cf
-}
-
-// AddNamespaceOrderFn add namespace order function
-func (ssn *Session) AddNamespaceOrderFn(name string, cf api.CompareFn) {
-	ssn.namespaceOrderFns[name] = cf
 }
 
 // AddPreemptableFn add preemptable function
@@ -71,6 +73,11 @@ func (ssn *Session) AddJobPipelinedFn(name string, vf api.VoteFn) {
 // AddPredicateFn add Predicate function
 func (ssn *Session) AddPredicateFn(name string, pf api.PredicateFn) {
 	ssn.predicateFns[name] = pf
+}
+
+// AddPrePredicateFn add PrePredicate function
+func (ssn *Session) AddPrePredicateFn(name string, pf api.PrePredicateFn) {
+	ssn.prePredicateFns[name] = pf
 }
 
 // AddBestNodeFn add BestNode function
@@ -103,6 +110,16 @@ func (ssn *Session) AddOverusedFn(name string, fn api.ValidateFn) {
 	ssn.overusedFns[name] = fn
 }
 
+// AddPreemptiveFn add preemptive function
+func (ssn *Session) AddPreemptiveFn(name string, fn api.ValidateWithCandidateFn) {
+	ssn.preemptiveFns[name] = fn
+}
+
+// AddAllocatableFn add allocatable function
+func (ssn *Session) AddAllocatableFn(name string, fn api.AllocatableFn) {
+	ssn.allocatableFns[name] = fn
+}
+
 // AddJobValidFn add jobvalid function
 func (ssn *Session) AddJobValidFn(name string, fn api.ValidateExFn) {
 	ssn.jobValidFns[name] = fn
@@ -111,6 +128,11 @@ func (ssn *Session) AddJobValidFn(name string, fn api.ValidateExFn) {
 // AddJobEnqueueableFn add jobenqueueable function
 func (ssn *Session) AddJobEnqueueableFn(name string, fn api.VoteFn) {
 	ssn.jobEnqueueableFns[name] = fn
+}
+
+// AddJobEnqueuedFn add jobEnqueued function
+func (ssn *Session) AddJobEnqueuedFn(name string, fn api.JobEnqueuedFn) {
+	ssn.jobEnqueuedFns[name] = fn
 }
 
 // AddTargetJobFn add targetjob function
@@ -124,8 +146,8 @@ func (ssn *Session) AddReservedNodesFn(name string, fn api.ReservedNodesFn) {
 }
 
 // AddVictimTasksFns add victimTasksFns function
-func (ssn *Session) AddVictimTasksFns(name string, fn api.VictimTasksFn) {
-	ssn.victimTasksFns[name] = fn
+func (ssn *Session) AddVictimTasksFns(name string, fns []api.VictimTasksFn) {
+	ssn.victimTasksFns[name] = fns
 }
 
 // AddJobStarvingFns add jobStarvingFns function
@@ -136,7 +158,6 @@ func (ssn *Session) AddJobStarvingFns(name string, fn api.ValidateFn) {
 // Reclaimable invoke reclaimable function of the plugins
 func (ssn *Session) Reclaimable(reclaimer *api.TaskInfo, reclaimees []*api.TaskInfo) []*api.TaskInfo {
 	var victims []*api.TaskInfo
-	var init bool
 
 	for _, tier := range ssn.Tiers {
 		for _, plugin := range tier.Plugins {
@@ -156,9 +177,9 @@ func (ssn *Session) Reclaimable(reclaimer *api.TaskInfo, reclaimees []*api.TaskI
 				victims = nil
 				break
 			}
-			if !init {
+			// first iteration - initialize victims list
+			if victims == nil {
 				victims = candidates
-				init = true
 			} else {
 				var intersection []*api.TaskInfo
 				// Get intersection of victims and candidates.
@@ -186,7 +207,6 @@ func (ssn *Session) Reclaimable(reclaimer *api.TaskInfo, reclaimees []*api.TaskI
 // Preemptable invoke preemptable function of the plugins
 func (ssn *Session) Preemptable(preemptor *api.TaskInfo, preemptees []*api.TaskInfo) []*api.TaskInfo {
 	var victims []*api.TaskInfo
-	var init bool
 
 	for _, tier := range ssn.Tiers {
 		for _, plugin := range tier.Plugins {
@@ -207,10 +227,9 @@ func (ssn *Session) Preemptable(preemptor *api.TaskInfo, preemptees []*api.TaskI
 				victims = nil
 				break
 			}
-
-			if !init {
+			// first iteration - initialize victims list
+			if victims == nil {
 				victims = candidates
-				init = true
 			} else {
 				var intersection []*api.TaskInfo
 				// Get intersection of victims and candidates.
@@ -239,6 +258,9 @@ func (ssn *Session) Preemptable(preemptor *api.TaskInfo, preemptees []*api.TaskI
 func (ssn *Session) Overused(queue *api.QueueInfo) bool {
 	for _, tier := range ssn.Tiers {
 		for _, plugin := range tier.Plugins {
+			if !isEnabled(plugin.EnabledOverused) {
+				continue
+			}
 			of, found := ssn.overusedFns[plugin.Name]
 			if !found {
 				continue
@@ -250,6 +272,46 @@ func (ssn *Session) Overused(queue *api.QueueInfo) bool {
 	}
 
 	return false
+}
+
+// Preemptive invoke can preemptive function of the plugins
+func (ssn *Session) Preemptive(queue *api.QueueInfo, candidate *api.TaskInfo) bool {
+	for _, tier := range ssn.Tiers {
+		for _, plugin := range tier.Plugins {
+			of, found := ssn.preemptiveFns[plugin.Name]
+			if !isEnabled(plugin.EnablePreemptive) {
+				continue
+			}
+			if !found {
+				continue
+			}
+			if !of(queue, candidate) {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+// Allocatable invoke allocatable function of the plugins
+func (ssn *Session) Allocatable(queue *api.QueueInfo, candidate *api.TaskInfo) bool {
+	for _, tier := range ssn.Tiers {
+		for _, plugin := range tier.Plugins {
+			if !isEnabled(plugin.EnabledAllocatable) {
+				continue
+			}
+			af, found := ssn.allocatableFns[plugin.Name]
+			if !found {
+				continue
+			}
+			if !af(queue, candidate) {
+				return false
+			}
+		}
+	}
+
+	return true
 }
 
 // JobReady invoke jobready function of the plugins
@@ -345,7 +407,6 @@ func (ssn *Session) JobValid(obj interface{}) *api.ValidateResult {
 			if vr := jrf(obj); vr != nil && !vr.Pass {
 				return vr
 			}
-
 		}
 	}
 
@@ -383,6 +444,23 @@ func (ssn *Session) JobEnqueueable(obj interface{}) bool {
 	return true
 }
 
+// JobEnqueued invoke jobEnqueuedFns function of the plugins
+func (ssn *Session) JobEnqueued(obj interface{}) {
+	for _, tier := range ssn.Tiers {
+		for _, plugin := range tier.Plugins {
+			if !isEnabled(plugin.EnabledJobEnqueued) {
+				continue
+			}
+			fn, found := ssn.jobEnqueuedFns[plugin.Name]
+			if !found {
+				continue
+			}
+
+			fn(obj)
+		}
+	}
+}
+
 // TargetJob invoke targetJobFns function of the plugins
 func (ssn *Session) TargetJob(jobs []*api.JobInfo) *api.JobInfo {
 	for _, tier := range ssn.Tiers {
@@ -400,47 +478,31 @@ func (ssn *Session) TargetJob(jobs []*api.JobInfo) *api.JobInfo {
 	return nil
 }
 
-// VictimTasks invoke ReservedNodes function of the plugins
-func (ssn *Session) VictimTasks() []*api.TaskInfo {
-	var victims []*api.TaskInfo
-	var init bool
-
+// VictimTasks returns the victims selected
+func (ssn *Session) VictimTasks(tasks []*api.TaskInfo) map[*api.TaskInfo]bool {
+	// different filters may add the same task to victims, so use a map to remove duplicate tasks.
+	victimSet := make(map[*api.TaskInfo]bool)
 	for _, tier := range ssn.Tiers {
 		for _, plugin := range tier.Plugins {
 			if !isEnabled(plugin.EnabledVictim) {
 				continue
 			}
-
-			pf, found := ssn.victimTasksFns[plugin.Name]
+			fns, found := ssn.victimTasksFns[plugin.Name]
 			if !found {
 				continue
 			}
-			candidates := pf()
-			if !init {
-				victims = candidates
-				init = true
-			} else {
-				var intersection []*api.TaskInfo
-				// Get intersection of victims and candidates.
-				for _, v := range victims {
-					for _, c := range candidates {
-						if v.UID == c.UID {
-							intersection = append(intersection, v)
-						}
-					}
+			for _, fn := range fns {
+				victimTasks := fn(tasks)
+				for _, victim := range victimTasks {
+					victimSet[victim] = true
 				}
-
-				// Update victims to intersection
-				victims = intersection
 			}
 		}
-		// Plugins in this tier made decision if victims is not nil
-		if victims != nil {
-			return victims
+		if len(victimSet) > 0 {
+			return victimSet
 		}
 	}
-
-	return victims
+	return victimSet
 }
 
 // ReservedNodes invoke ReservedNodes function of the plugins
@@ -483,32 +545,6 @@ func (ssn *Session) JobOrderFn(l, r interface{}) bool {
 		return lv.UID < rv.UID
 	}
 	return lv.CreationTimestamp.Before(&rv.CreationTimestamp)
-
-}
-
-// NamespaceOrderFn invoke namespaceorder function of the plugins
-func (ssn *Session) NamespaceOrderFn(l, r interface{}) bool {
-	for _, tier := range ssn.Tiers {
-		for _, plugin := range tier.Plugins {
-			if !isEnabled(plugin.EnabledNamespaceOrder) {
-				continue
-			}
-			nof, found := ssn.namespaceOrderFns[plugin.Name]
-			if !found {
-				continue
-			}
-			if j := nof(l, r); j != 0 {
-				return j < 0
-			}
-		}
-	}
-
-	// TODO(lminzhw): if all NamespaceOrderFn treat these two namespace as the same,
-	// we should make the job order have its affect among namespaces.
-	// or just schedule namespace one by one
-	lv := l.(api.NamespaceName)
-	rv := r.(api.NamespaceName)
-	return lv < rv
 }
 
 // ClusterOrderFn invoke ClusterOrderFn function of the plugins
@@ -548,7 +584,6 @@ func (ssn *Session) QueueOrderFn(l, r interface{}) bool {
 			if j := qof(l, r); j != 0 {
 				return j < 0
 			}
-
 		}
 	}
 
@@ -559,7 +594,23 @@ func (ssn *Session) QueueOrderFn(l, r interface{}) bool {
 		return lv.UID < rv.UID
 	}
 	return lv.Queue.CreationTimestamp.Before(&rv.Queue.CreationTimestamp)
+}
 
+// VictimQueueOrderFn invoke victimqueueorder function of the plugins
+func (ssn *Session) VictimQueueOrderFn(l, r, preemptor interface{}) bool {
+	for _, tier := range ssn.Tiers {
+		for _, plugin := range tier.Plugins {
+			qof, found := ssn.victimQueueOrderFns[plugin.Name]
+			if !found {
+				continue
+			}
+			if j := qof(l, r, preemptor); j != 0 {
+				return j < 0
+			}
+		}
+	}
+
+	return !ssn.QueueOrderFn(l, r)
 }
 
 // TaskCompareFns invoke taskorder function of the plugins
@@ -588,14 +639,10 @@ func (ssn *Session) TaskOrderFn(l, r interface{}) bool {
 		return res < 0
 	}
 
-	// If no task order funcs, order task by CreationTimestamp first, then by UID.
+	// If no task order funcs, order task by default func.
 	lv := l.(*api.TaskInfo)
 	rv := r.(*api.TaskInfo)
-	if lv.Pod.CreationTimestamp.Equal(&rv.Pod.CreationTimestamp) {
-		return lv.UID < rv.UID
-	}
-	return lv.Pod.CreationTimestamp.Before(&rv.Pod.CreationTimestamp)
-
+	return helpers.CompareTask(lv, rv)
 }
 
 // PredicateFn invoke predicate function of the plugins
@@ -610,6 +657,27 @@ func (ssn *Session) PredicateFn(task *api.TaskInfo, node *api.NodeInfo) error {
 				continue
 			}
 			err := pfn(task, node)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// PrePredicateFn invoke predicate function of the plugins
+func (ssn *Session) PrePredicateFn(task *api.TaskInfo) error {
+	for _, tier := range ssn.Tiers {
+		for _, plugin := range tier.Plugins {
+			// we use same option as predicates for they are
+			if !isEnabled(plugin.EnabledPredicate) {
+				continue
+			}
+			pfn, found := ssn.prePredicateFns[plugin.Name]
+			if !found {
+				continue
+			}
+			err := pfn(task)
 			if err != nil {
 				return err
 			}
@@ -655,7 +723,6 @@ func (ssn *Session) NodeOrderFn(task *api.TaskInfo, node *api.NodeInfo) (float64
 				return 0, err
 			}
 			priorityScore += score
-
 		}
 	}
 	return priorityScore, nil
@@ -712,7 +779,6 @@ func (ssn *Session) NodeOrderMapFn(task *api.TaskInfo, node *api.NodeInfo) (map[
 				}
 				nodeScoreMap[plugin.Name] = score
 			}
-
 		}
 	}
 	return nodeScoreMap, priorityScore, nil
@@ -739,4 +805,31 @@ func (ssn *Session) NodeOrderReduceFn(task *api.TaskInfo, pluginNodeScoreMap map
 		}
 	}
 	return nodeScoreMap, nil
+}
+
+// BuildVictimsPriorityQueue returns a priority queue with victims sorted by:
+// if victims has same job id, sorted by !ssn.TaskOrderFn
+// if victims has different job id, sorted by !ssn.JobOrderFn
+func (ssn *Session) BuildVictimsPriorityQueue(victims []*api.TaskInfo, preemptor *api.TaskInfo) *util.PriorityQueue {
+	victimsQueue := util.NewPriorityQueue(func(l, r interface{}) bool {
+		lv := l.(*api.TaskInfo)
+		rv := r.(*api.TaskInfo)
+		if lv.Job == rv.Job {
+			return !ssn.TaskOrderFn(l, r)
+		}
+
+		lvJob, lvJobFound := ssn.Jobs[lv.Job]
+		rvJob, rvJobFound := ssn.Jobs[rv.Job]
+		preemptorJob, preemptorJobFound := ssn.Jobs[preemptor.Job]
+
+		if lvJobFound && rvJobFound && preemptorJobFound && lvJob.Queue != rvJob.Queue {
+			return ssn.VictimQueueOrderFn(ssn.Queues[lvJob.Queue], ssn.Queues[rvJob.Queue], ssn.Queues[preemptorJob.Queue])
+		}
+
+		return !ssn.JobOrderFn(lvJob, rvJob)
+	})
+	for _, victim := range victims {
+		victimsQueue.Push(victim)
+	}
+	return victimsQueue
 }

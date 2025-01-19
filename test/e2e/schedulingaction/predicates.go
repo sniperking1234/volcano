@@ -17,7 +17,7 @@ limitations under the License.
 package schedulingaction
 
 import (
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	v1 "k8s.io/api/core/v1"
@@ -106,7 +106,6 @@ var _ = Describe("Predicates E2E Test", func() {
 	})
 
 	It("Pod Affinity", func() {
-		Skip("Skip temporarily for there may be some bugs and fix is on the way")
 		context := e2eutil.InitTestContext(e2eutil.Options{})
 		defer e2eutil.CleanupTestContext(context)
 

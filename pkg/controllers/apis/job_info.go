@@ -19,12 +19,12 @@ package apis
 import (
 	"fmt"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 
 	batch "volcano.sh/apis/pkg/apis/batch/v1alpha1"
 )
 
-//JobInfo struct.
+// JobInfo struct.
 type JobInfo struct {
 	Namespace string
 	Name      string
@@ -33,18 +33,18 @@ type JobInfo struct {
 	Pods map[string]map[string]*v1.Pod
 }
 
-//Clone function clones the k8s pod values to the JobInfo struct.
+// Clone function clones the k8s pod values to the JobInfo struct.
 func (ji *JobInfo) Clone() *JobInfo {
 	job := &JobInfo{
 		Namespace: ji.Namespace,
 		Name:      ji.Name,
 		Job:       ji.Job,
 
-		Pods: make(map[string]map[string]*v1.Pod),
+		Pods: make(map[string]map[string]*v1.Pod, len(ji.Pods)),
 	}
 
 	for key, pods := range ji.Pods {
-		job.Pods[key] = make(map[string]*v1.Pod)
+		job.Pods[key] = make(map[string]*v1.Pod, len(pods))
 		for pn, pod := range pods {
 			job.Pods[key][pn] = pod
 		}
@@ -53,19 +53,19 @@ func (ji *JobInfo) Clone() *JobInfo {
 	return job
 }
 
-//SetJob sets the volcano jobs values to the JobInfo struct.
+// SetJob sets the volcano jobs values to the JobInfo struct.
 func (ji *JobInfo) SetJob(job *batch.Job) {
 	ji.Name = job.Name
 	ji.Namespace = job.Namespace
 	ji.Job = job
 }
 
-//AddPod adds the k8s pod object values to the Pods field
-//of JobStruct if it doesn't exist. Otherwise it throws error.
+// AddPod adds the k8s pod object values to the Pods field
+// of JobStruct if it doesn't exist. Otherwise it throws error.
 func (ji *JobInfo) AddPod(pod *v1.Pod) error {
 	taskName, found := pod.Annotations[batch.TaskSpecKey]
 	if !found {
-		return fmt.Errorf("failed to taskName of Pod <%s/%s>",
+		return fmt.Errorf("failed to find taskName of Pod <%s/%s>",
 			pod.Namespace, pod.Name)
 	}
 
@@ -86,7 +86,7 @@ func (ji *JobInfo) AddPod(pod *v1.Pod) error {
 	return nil
 }
 
-//UpdatePod updates the k8s pod object values to the existing pod.
+// UpdatePod updates the k8s pod object values to the existing pod.
 func (ji *JobInfo) UpdatePod(pod *v1.Pod) error {
 	taskName, found := pod.Annotations[batch.TaskSpecKey]
 	if !found {
@@ -111,7 +111,7 @@ func (ji *JobInfo) UpdatePod(pod *v1.Pod) error {
 	return nil
 }
 
-//DeletePod deletes the given k8s pod from the JobInfo struct.
+// DeletePod deletes the given k8s pod from the JobInfo struct.
 func (ji *JobInfo) DeletePod(pod *v1.Pod) error {
 	taskName, found := pod.Annotations[batch.TaskSpecKey]
 	if !found {

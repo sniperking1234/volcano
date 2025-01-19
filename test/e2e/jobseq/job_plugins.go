@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"strings"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	cv1 "k8s.io/api/core/v1"
@@ -108,7 +108,6 @@ var _ = Describe("Job E2E Test: Test Job Plugins", func() {
 	})
 
 	It("Test SSh Plugin with Pod Affinity", func() {
-		Skip("Skip temporarily for there may be some bugs and fix is on the way")
 		jobName := "job-with-ssh-plugin"
 		taskName := "task"
 		foundVolume := false

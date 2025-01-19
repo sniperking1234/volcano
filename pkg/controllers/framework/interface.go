@@ -19,17 +19,30 @@ package framework
 import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+
 	vcclientset "volcano.sh/apis/pkg/client/clientset/versioned"
+	vcinformer "volcano.sh/apis/pkg/client/informers/externalversions"
 )
 
 // ControllerOption is the main context object for the controllers.
 type ControllerOption struct {
-	KubeClient            kubernetes.Interface
-	VolcanoClient         vcclientset.Interface
-	SharedInformerFactory informers.SharedInformerFactory
-	SchedulerName         string
-	WorkerNum             uint32
-	MaxRequeueNum         int
+	KubeClient              kubernetes.Interface
+	VolcanoClient           vcclientset.Interface
+	SharedInformerFactory   informers.SharedInformerFactory
+	VCSharedInformerFactory vcinformer.SharedInformerFactory
+	SchedulerNames          []string
+	WorkerNum               uint32
+	MaxRequeueNum           int
+
+	InheritOwnerAnnotations bool
+	WorkerThreadsForPG      uint32
+	WorkerThreadsForQueue   uint32
+	WorkerThreadsForGC      uint32
+
+	// Config holds the common attributes that can be passed to a Kubernetes client
+	// and controllers registered by the users can use it.
+	Config *rest.Config
 }
 
 // Controller is the interface of all controllers.

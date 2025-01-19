@@ -17,21 +17,26 @@ limitations under the License.
 package router
 
 import (
-	"k8s.io/api/admission/v1beta1"
-	whv1beta1 "k8s.io/api/admissionregistration/v1beta1"
+	admissionv1 "k8s.io/api/admission/v1"
+	whv1 "k8s.io/api/admissionregistration/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
+
 	"volcano.sh/apis/pkg/client/clientset/versioned"
+	schedulinglister "volcano.sh/apis/pkg/client/listers/scheduling/v1beta1"
+	"volcano.sh/volcano/pkg/webhooks/config"
 )
 
-//The AdmitFunc returns response.
-type AdmitFunc func(v1beta1.AdmissionReview) *v1beta1.AdmissionResponse
+// The AdmitFunc returns response.
+type AdmitFunc func(admissionv1.AdmissionReview) *admissionv1.AdmissionResponse
 
 type AdmissionServiceConfig struct {
-	SchedulerName string
-	KubeClient    kubernetes.Interface
-	VolcanoClient versioned.Interface
-	Recorder      record.EventRecorder
+	SchedulerNames []string
+	KubeClient     kubernetes.Interface
+	VolcanoClient  versioned.Interface
+	QueueLister    schedulinglister.QueueLister
+	Recorder       record.EventRecorder
+	ConfigData     *config.AdmissionConfiguration
 }
 
 type AdmissionService struct {
@@ -39,8 +44,8 @@ type AdmissionService struct {
 	Func    AdmitFunc
 	Handler AdmissionHandler
 
-	ValidatingConfig *whv1beta1.ValidatingWebhookConfiguration
-	MutatingConfig   *whv1beta1.MutatingWebhookConfiguration
+	ValidatingConfig *whv1.ValidatingWebhookConfiguration
+	MutatingConfig   *whv1.MutatingWebhookConfiguration
 
 	Config *AdmissionServiceConfig
 }

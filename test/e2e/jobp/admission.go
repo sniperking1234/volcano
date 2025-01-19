@@ -20,7 +20,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 
 	corev1 "k8s.io/api/core/v1"
@@ -253,7 +253,7 @@ var _ = ginkgo.Describe("Job E2E Test: Test Admission service", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 
-	ginkgo.It("Can't create volcano pod when podgroup is Pending", func() {
+	ginkgo.It("Allow to create pod when podgroup is Pending", func() {
 		podName := "pod-volcano"
 		pgName := "pending-pg"
 		ctx := e2eutil.InitTestContext(e2eutil.Options{})
@@ -293,7 +293,7 @@ var _ = ginkgo.Describe("Job E2E Test: Test Admission service", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		_, err = ctx.Kubeclient.CoreV1().Pods(ctx.Namespace).Create(context.TODO(), pod, v1.CreateOptions{})
-		gomega.Expect(err.Error()).Should(gomega.ContainSubstring(`the podgroup phase is Pending`))
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 
 	ginkgo.It("Job mutate check", func() {
@@ -1349,6 +1349,102 @@ var _ = ginkgo.Describe("Job E2E Test: Test Admission service", func() {
 		gomega.Expect(err).To(gomega.HaveOccurred())
 	})
 
+	ginkgo.It("job validate check: create job with root queue", func() {
+		ctx := e2eutil.InitTestContext(e2eutil.Options{})
+		defer e2eutil.CleanupTestContext(ctx)
+
+		var job v1alpha1.Job
+		jsonData := []byte(`{
+			"apiVersion": "batch.volcano.sh/v1alpha1",
+			"kind": "Job",
+		 	"metadata": {
+			"name": "test-job"
+		 },
+		 "spec": {
+			 "minAvailable": 1,
+			 "queue": "root",
+			 "tasks": [
+				 {
+					 "replicas": 2,
+					 "template": {
+						 "spec": {
+							 "containers": [
+								 {
+									 "image": "nginx",
+									 "imagePullPolicy": "IfNotPresent",
+									 "name": "nginx",
+									 "resources": {
+										 "requests": {
+											 "cpu": "1"
+										 }
+									 }
+								 }
+							 ],
+							 "restartPolicy": "Never"
+						 }
+					 }
+				 }
+			 ]
+		 }
+	 }`)
+		err := json.Unmarshal(jsonData, &job)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		_, err = ctx.Vcclient.BatchV1alpha1().Jobs(ctx.Namespace).Create(context.TODO(), &job, v1.CreateOptions{})
+		gomega.Expect(err).To(gomega.HaveOccurred())
+	})
+
+	ginkgo.It("job validate check: create job with non-leaf queue", func() {
+
+		ctx := e2eutil.InitTestContext(e2eutil.Options{
+			Queues: []string{"q1", "q11"},
+			QueueParent: map[string]string{
+				"q1":  "root",
+				"q11": "q1",
+			},
+		})
+		ctx.Queues = []string{"q11", "q1"}
+		defer e2eutil.CleanupTestContext(ctx)
+
+		var job v1alpha1.Job
+		jsonData := []byte(`{
+			"apiVersion": "batch.volcano.sh/v1alpha1",
+			"kind": "Job",
+		 	"metadata": {
+			"name": "test-job"
+		 },
+		 "spec": {
+			 "minAvailable": 1,
+			 "queue": "q1",
+			 "tasks": [
+				 {
+					 "replicas": 2,
+					 "template": {
+						 "spec": {
+							 "containers": [
+								 {
+									 "image": "nginx",
+									 "imagePullPolicy": "IfNotPresent",
+									 "name": "nginx",
+									 "resources": {
+										 "requests": {
+											 "cpu": "1"
+										 }
+									 }
+								 }
+							 ],
+							 "restartPolicy": "Never"
+						 }
+					 }
+				 }
+			 ]
+		 }
+	 }`)
+		err := json.Unmarshal(jsonData, &job)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		_, err = ctx.Vcclient.BatchV1alpha1().Jobs(ctx.Namespace).Create(context.TODO(), &job, v1.CreateOptions{})
+		gomega.Expect(err).To(gomega.HaveOccurred())
+	})
+
 	ginkgo.It("job validate check: create job with priviledged container", func() {
 		ctx := e2eutil.InitTestContext(e2eutil.Options{})
 		defer e2eutil.CleanupTestContext(ctx)
@@ -1395,7 +1491,7 @@ var _ = ginkgo.Describe("Job E2E Test: Test Admission service", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 
-	ginkgo.It("queue check: open queue can NOT be deleted", func() {
+	ginkgo.It("queue check: open queue can be deleted", func() {
 		queueName := "deleted-open-queue"
 		ctx := e2eutil.InitTestContext(e2eutil.Options{})
 		defer e2eutil.CleanupTestContext(ctx)
@@ -1421,6 +1517,6 @@ var _ = ginkgo.Describe("Job E2E Test: Test Admission service", func() {
 		})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		err = ctx.Vcclient.SchedulingV1beta1().Queues().Delete(context.TODO(), queue.Name, metav1.DeleteOptions{})
-		gomega.Expect(err).To(gomega.HaveOccurred())
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 })

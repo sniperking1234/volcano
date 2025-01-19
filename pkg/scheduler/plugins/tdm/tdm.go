@@ -22,8 +22,8 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/klog"
-	"k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
+	"k8s.io/klog/v2"
+	k8sFramework "k8s.io/kubernetes/pkg/scheduler/framework"
 
 	"volcano.sh/volcano/pkg/scheduler/api"
 	"volcano.sh/volcano/pkg/scheduler/framework"
@@ -38,7 +38,6 @@ const (
 	revocableZoneLayout      = "15:04"
 	revocableZoneLabelPrefix = "tdm.revocable-zone."
 	evictPeriodLabel         = "tdm.evict.period"
-	evictMaxStepLabel        = "tdm.evict.max-step"
 	defaultPodEvictNum       = 1
 )
 
@@ -69,12 +68,12 @@ func New(args framework.Arguments) framework.Plugin {
 
 	for k, v := range args {
 		if strings.Contains(k, revocableZoneLabelPrefix) {
-			revocableZone[strings.Replace(k, revocableZoneLabelPrefix, "", 1)] = v
+			revocableZone[strings.Replace(k, revocableZoneLabelPrefix, "", 1)] = v.(string)
 		}
 	}
 
 	if period, ok := args[evictPeriodLabel]; ok {
-		if d, err := time.ParseDuration(period); err == nil {
+		if d, err := time.ParseDuration(period.(string)); err == nil {
 			evictPeriod = d
 		}
 	}
@@ -138,28 +137,33 @@ func (tp *tdmPlugin) availableRevocableZone(rz string) error {
 }
 
 func (tp *tdmPlugin) OnSessionOpen(ssn *framework.Session) {
-	klog.V(4).Infof("Enter tdm plugin ...")
-	if klog.V(4) {
-		defer func() {
-			klog.V(4).Infof("Leaving tdm plugin.")
-		}()
-	}
+	klog.V(5).Infof("Enter tdm plugin ...")
+	defer func() {
+		klog.V(5).Infof("Leaving tdm plugin.")
+	}()
 
 	// tdm plugin just handle revocable node
 	predicateFn := func(task *api.TaskInfo, node *api.NodeInfo) error {
+		tdmStatus := &api.Status{
+			Plugin: PluginName,
+		}
+		predicateStatus := []*api.Status{tdmStatus}
 		if node.RevocableZone == "" {
 			return nil
 		}
 
 		if err := tp.availableRevocableZone(node.RevocableZone); err != nil {
-			return fmt.Errorf("plugin %s predicates %w", tp.Name(), err)
+			tdmStatus.Code = api.UnschedulableAndUnresolvable
+			tdmStatus.Reason = err.Error()
+			return api.NewFitErrWithStatus(task, node, predicateStatus...)
 		}
 
 		klog.V(4).Infof("TDM node %v revocable zone %v:%v is active", node.Name, node.RevocableZone, tp.revocableZone[node.RevocableZone])
 
 		if len(task.RevocableZone) == 0 {
-			msg := fmt.Sprintf("task %s/%s is not allow to dispatch to revocable node %s", task.Namespace, task.Name, node.Name)
-			return fmt.Errorf("plugin %s predicates %s", tp.Name(), msg)
+			tdmStatus.Code = api.UnschedulableAndUnresolvable
+			tdmStatus.Reason = "not allow to dispatch to revocable node"
+			return api.NewFitErrWithStatus(task, node, predicateStatus...)
 		}
 
 		klog.V(4).Infof("TDM filter for Task %s/%s on node %s pass.", task.Namespace, task.Name, node.Name)
@@ -184,7 +188,7 @@ func (tp *tdmPlugin) OnSessionOpen(ssn *framework.Session) {
 			return score, nil
 		}
 
-		score = float64(v1alpha1.MaxNodeScore)
+		score = float64(k8sFramework.MaxNodeScore)
 
 		klog.V(4).Infof("TDM score for Task %s/%s on node %s is: %v", task.Namespace, task.Name, node.Name, score)
 		return score, nil
@@ -229,7 +233,7 @@ func (tp *tdmPlugin) OnSessionOpen(ssn *framework.Session) {
 		return victims, tutil.Permit
 	}
 
-	victimsFn := func() []*api.TaskInfo {
+	victimsFn := func([]*api.TaskInfo) []*api.TaskInfo {
 		if lastEvictAt.Add(tp.evictPeriod).After(time.Now()) {
 			klog.V(4).Infof("TDM next evict time at %v", lastEvictAt)
 			return nil
@@ -276,8 +280,7 @@ func (tp *tdmPlugin) OnSessionOpen(ssn *framework.Session) {
 
 	jobPipelinedFn := func(obj interface{}) int {
 		jobInfo := obj.(*api.JobInfo)
-		occupied := jobInfo.WaitingTaskNum() + jobInfo.ReadyTaskNum()
-		if occupied >= jobInfo.MinAvailable {
+		if jobInfo.IsPipelined() {
 			return tutil.Permit
 		}
 		return tutil.Reject
@@ -292,10 +295,12 @@ func (tp *tdmPlugin) OnSessionOpen(ssn *framework.Session) {
 		return len(jobInfo.TaskStatusIndex[api.Pending]) > 0
 	}
 
+	victimsFns := make([]api.VictimTasksFn, 0)
+	victimsFns = append(victimsFns, victimsFn)
 	ssn.AddPredicateFn(tp.Name(), predicateFn)
 	ssn.AddNodeOrderFn(tp.Name(), nodeOrderFn)
 	ssn.AddPreemptableFn(tp.Name(), preemptableFn)
-	ssn.AddVictimTasksFns(tp.Name(), victimsFn)
+	ssn.AddVictimTasksFns(tp.Name(), victimsFns)
 	ssn.AddJobOrderFn(tp.Name(), jobOrderFn)
 	ssn.AddJobPipelinedFn(tp.Name(), jobPipelinedFn)
 	ssn.AddJobStarvingFns(tp.Name(), jobStarvingFn)

@@ -1,13 +1,29 @@
+/*
+Copyright 2025 The Volcano Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package framework
 
 import (
 	"context"
 	"math/rand"
-	"reflect"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"volcano.sh/apis/pkg/apis/scheduling"
 	"volcano.sh/volcano/pkg/scheduler/api"
@@ -15,9 +31,6 @@ import (
 
 const (
 	jobUpdaterWorker = 16
-
-	jobConditionUpdateTime       = time.Minute
-	jobConditionUpdateTimeJitter = 30 * time.Second
 )
 
 // TimeJitterAfter means: new after old + duration + jitter
@@ -61,9 +74,6 @@ func isPodGroupConditionsUpdated(newCondition, oldCondition []scheduling.PodGrou
 
 		newTime := newCond.LastTransitionTime
 		oldTime := oldCond.LastTransitionTime
-		if TimeJitterAfter(newTime.Time, oldTime.Time, jobConditionUpdateTime, jobConditionUpdateTimeJitter) {
-			return true
-		}
 
 		// if newCond is not new enough, we treat it the same as the old one
 		newCond.LastTransitionTime = oldTime
@@ -72,7 +82,7 @@ func isPodGroupConditionsUpdated(newCondition, oldCondition []scheduling.PodGrou
 		newTransitionID := newCond.TransitionID
 		newCond.TransitionID = oldCond.TransitionID
 
-		shouldUpdate := !reflect.DeepEqual(&newCond, &oldCond)
+		shouldUpdate := !equality.Semantic.DeepEqual(&newCond, &oldCond)
 
 		newCond.LastTransitionTime = newTime
 		newCond.TransitionID = newTransitionID
@@ -90,7 +100,7 @@ func isPodGroupStatusUpdated(newStatus, oldStatus scheduling.PodGroupStatus) boo
 	oldCondition := oldStatus.Conditions
 	oldStatus.Conditions = nil
 
-	return !reflect.DeepEqual(newStatus, oldStatus) || isPodGroupConditionsUpdated(newCondition, oldCondition)
+	return !equality.Semantic.DeepEqual(newStatus, oldStatus) || isPodGroupConditionsUpdated(newCondition, oldCondition)
 }
 
 // updateJob update specified job

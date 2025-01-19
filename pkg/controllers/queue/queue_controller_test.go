@@ -21,23 +21,30 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kubeclient "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/cache"
 
 	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 	vcclient "volcano.sh/apis/pkg/client/clientset/versioned/fake"
+	informerfactory "volcano.sh/apis/pkg/client/informers/externalversions"
+	"volcano.sh/volcano/pkg/controllers/apis"
 	"volcano.sh/volcano/pkg/controllers/framework"
+	"volcano.sh/volcano/pkg/controllers/queue/state"
 )
 
 func newFakeController() *queuecontroller {
 	KubeBatchClientSet := vcclient.NewSimpleClientset()
 	KubeClientSet := kubeclient.NewSimpleClientset()
 
+	vcSharedInformers := informerfactory.NewSharedInformerFactory(KubeBatchClientSet, 0)
+
 	controller := &queuecontroller{}
 	opt := framework.ControllerOption{
-		VolcanoClient: KubeBatchClientSet,
-		KubeClient:    KubeClientSet,
+		VolcanoClient:           KubeBatchClientSet,
+		KubeClient:              KubeClientSet,
+		VCSharedInformerFactory: vcSharedInformers,
 	}
 
 	controller.Initialize(&opt)
@@ -235,58 +242,64 @@ func TestUpdatePodGroup(t *testing.T) {
 }
 
 func TestSyncQueue(t *testing.T) {
-	namespace := "c1"
-
 	testCases := []struct {
-		Name        string
-		podGroup    *schedulingv1beta1.PodGroup
-		queue       *schedulingv1beta1.Queue
-		ExpectValue int32
+		Name                  string
+		queue                 *schedulingv1beta1.Queue
+		updateStatusFnFactory func(queue *schedulingv1beta1.Queue) state.UpdateQueueStatusFn
+		ExpectState           schedulingv1beta1.QueueState
 	}{
 		{
-			Name: "syncQueue",
-			podGroup: &schedulingv1beta1.PodGroup{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "pg1",
-					Namespace: namespace,
-				},
-				Spec: schedulingv1beta1.PodGroupSpec{
-					Queue: "c1",
-				},
-				Status: schedulingv1beta1.PodGroupStatus{
-					Phase: schedulingv1beta1.PodGroupPending,
-				},
-			},
+			Name: "From empty state to open",
 			queue: &schedulingv1beta1.Queue{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "c1",
+					Name: "root",
 				},
-				Spec: schedulingv1beta1.QueueSpec{
-					Weight: 1,
+				Status: schedulingv1beta1.QueueStatus{
+					State: "",
 				},
 			},
-			ExpectValue: 1,
+			ExpectState: schedulingv1beta1.QueueStateOpen,
+			updateStatusFnFactory: func(queue *schedulingv1beta1.Queue) state.UpdateQueueStatusFn {
+				return func(status *schedulingv1beta1.QueueStatus, podGroupList []string) {
+					if len(queue.Status.State) == 0 {
+						status.State = schedulingv1beta1.QueueStateOpen
+					}
+				}
+			},
+		},
+		{
+			Name: "From open to close",
+			queue: &schedulingv1beta1.Queue{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "root",
+				},
+				Status: schedulingv1beta1.QueueStatus{
+					State: schedulingv1beta1.QueueStateOpen,
+				},
+			},
+			ExpectState: schedulingv1beta1.QueueStateClosed,
+			updateStatusFnFactory: func(queue *schedulingv1beta1.Queue) state.UpdateQueueStatusFn {
+				return func(status *schedulingv1beta1.QueueStatus, podGroupList []string) {
+					status.State = schedulingv1beta1.QueueStateClosed
+				}
+			},
 		},
 	}
 
-	for i, testcase := range testCases {
+	for _, testcase := range testCases {
 		c := newFakeController()
 
-		key, _ := cache.MetaNamespaceKeyFunc(testcase.podGroup)
-		c.podGroups[testcase.podGroup.Spec.Queue] = make(map[string]struct{})
-		c.podGroups[testcase.podGroup.Spec.Queue][key] = struct{}{}
+		_, err := c.vcClient.SchedulingV1beta1().Queues().Create(context.TODO(), testcase.queue, metav1.CreateOptions{})
+		assert.NoError(t, err)
 
-		c.pgInformer.Informer().GetIndexer().Add(testcase.podGroup)
-		c.queueInformer.Informer().GetIndexer().Add(testcase.queue)
-		c.vcClient.SchedulingV1beta1().Queues().Create(context.TODO(), testcase.queue, metav1.CreateOptions{})
+		updateStatusFn := testcase.updateStatusFnFactory(testcase.queue)
+		err = c.syncQueue(testcase.queue, updateStatusFn)
+		assert.NoError(t, err)
 
-		err := c.syncQueue(testcase.queue, nil)
-		item, _ := c.vcClient.SchedulingV1beta1().Queues().Get(context.TODO(), testcase.queue.Name, metav1.GetOptions{})
-		if err != nil && testcase.ExpectValue != item.Status.Pending {
-			t.Errorf("case %d (%s): expected: %v, got %v ", i, testcase.Name, testcase.ExpectValue, c.queue.Len())
-		}
+		item, err := c.vcClient.SchedulingV1beta1().Queues().Get(context.TODO(), testcase.queue.Name, metav1.GetOptions{})
+		assert.NoError(t, err)
+		assert.Equal(t, testcase.ExpectState, item.Status.State)
 	}
-
 }
 
 func TestProcessNextWorkItem(t *testing.T) {
@@ -302,7 +315,7 @@ func TestProcessNextWorkItem(t *testing.T) {
 
 	for i, testcase := range testCases {
 		c := newFakeController()
-		c.queue.Add("test")
+		c.queue.Add(&apis.Request{JobName: "test"})
 		bVal := c.processNextWorkItem()
 		fmt.Println("The value of boolean is ", bVal)
 		if c.queue.Len() != 0 {

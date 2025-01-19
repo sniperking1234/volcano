@@ -18,10 +18,11 @@ package tasktopology
 
 import (
 	"fmt"
-	"k8s.io/klog"
-	"k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
 	"strings"
 	"time"
+
+	"k8s.io/klog/v2"
+	k8sFramework "k8s.io/kubernetes/pkg/scheduler/framework"
 
 	"volcano.sh/volcano/pkg/scheduler/api"
 	"volcano.sh/volcano/pkg/scheduler/framework"
@@ -52,40 +53,43 @@ func (p *taskTopologyPlugin) Name() string {
 //
 // for example:
 // A:
-//  | bucket1   | bucket2   | out of bucket
-//  | a1 a3     | a2        | a4
+//
+//	| bucket1   | bucket2   | out of bucket
+//	| a1 a3     | a2        | a4
+//
 // B:
-//  | bucket1   | out of bucket
-//  | b1 b2     | b3
+//
+//	| bucket1   | out of bucket
+//	| b1 b2     | b3
+//
 // the right task order should be:
-//   a1 a3 a2 b1 b2 a4 b3
+//
+//	a1 a3 a2 b1 b2 a4 b3
 func (p *taskTopologyPlugin) TaskOrderFn(l interface{}, r interface{}) int {
 	lv, ok := l.(*api.TaskInfo)
 	if !ok {
 		klog.Errorf("Object is not a taskinfo")
+		return 0
 	}
 	rv, ok := r.(*api.TaskInfo)
 	if !ok {
 		klog.Errorf("Object is not a taskinfo")
+		return 0
 	}
 
 	lvJobManager := p.managers[lv.Job]
 	rvJobManager := p.managers[rv.Job]
-
-	var lvBucket, rvBucket *Bucket
-	if lvJobManager != nil {
-		lvBucket = lvJobManager.GetBucket(lv)
-	} else {
+	if lvJobManager == nil {
 		klog.V(4).Infof("No job manager for job <ID: %s>, do not return task order.", lv.Job)
 		return 0
 	}
-	if rvJobManager != nil {
-		rvBucket = rvJobManager.GetBucket(rv)
-	} else {
+	if rvJobManager == nil {
 		klog.V(4).Infof("No job manager for job <ID: %s>, do not return task order.", rv.Job)
 		return 0
 	}
 
+	lvBucket := lvJobManager.GetBucket(lv)
+	rvBucket := rvJobManager.GetBucket(rv)
 	// the one have bucket would always prior to another
 	lvInBucket := lvBucket != nil
 	rvInBucket := rvBucket != nil
@@ -134,7 +138,7 @@ func (p *taskTopologyPlugin) TaskOrderFn(l interface{}, r interface{}) int {
 func (p *taskTopologyPlugin) calcBucketScore(task *api.TaskInfo, node *api.NodeInfo) (int, *JobManager, error) {
 	// task could never fits the node
 	maxResource := node.Idle.Clone().Add(node.Releasing)
-	if req := task.Resreq; req != nil && maxResource.LessInSomeDimension(req) {
+	if req := task.Resreq; req != nil && maxResource.LessPartly(req, api.Zero) {
 		return 0, nil, nil
 	}
 
@@ -165,7 +169,7 @@ func (p *taskTopologyPlugin) calcBucketScore(task *api.TaskInfo, node *api.NodeI
 
 	// 3. the other tasks in bucket take into considering
 	score += len(bucket.tasks)
-	if bucket.request == nil || bucket.request.LessEqualInAllDimension(maxResource, api.Zero) {
+	if bucket.request == nil || bucket.request.LessEqual(maxResource, api.Zero) {
 		return score, jobManager, nil
 	}
 
@@ -178,7 +182,7 @@ func (p *taskTopologyPlugin) calcBucketScore(task *api.TaskInfo, node *api.NodeI
 		}
 		remains.Sub(bucketTask.Resreq)
 		score--
-		if remains.LessEqualInAllDimension(maxResource, api.Zero) {
+		if remains.LessEqual(maxResource, api.Zero) {
 			break
 		}
 	}
@@ -193,7 +197,7 @@ func (p *taskTopologyPlugin) NodeOrderFn(task *api.TaskInfo, node *api.NodeInfo)
 	}
 	fScore := float64(score * p.weight)
 	if jobManager != nil && jobManager.bucketMaxSize != 0 {
-		fScore = fScore * float64(v1alpha1.MaxNodeScore) / float64(jobManager.bucketMaxSize)
+		fScore = fScore * float64(k8sFramework.MaxNodeScore) / float64(jobManager.bucketMaxSize)
 	}
 	klog.V(4).Infof("task %s/%s at node %s has bucket score %d, score %f",
 		task.Namespace, task.Name, node.Name, score, fScore)
@@ -212,7 +216,7 @@ func (p *taskTopologyPlugin) AllocateFunc(event *framework.Event) {
 
 func (p *taskTopologyPlugin) initBucket(ssn *framework.Session) {
 	for jobID, job := range ssn.Jobs {
-		if noPendingTasks(job) {
+		if !job.HasPendingTasks() {
 			klog.V(4).Infof("No pending tasks in job <%s/%s> by plugin %s.",
 				job.Namespace, job.Name, PluginName)
 			continue
@@ -244,9 +248,8 @@ func affinityCheck(job *api.JobInfo, affinity [][]string) error {
 	var taskNumber = len(job.Tasks)
 	var taskRef = make(map[string]bool, taskNumber)
 	for _, task := range job.Tasks {
-		tmpStrings := strings.Split(task.Name, "-")
-		if _, exist := taskRef[tmpStrings[len(tmpStrings)-2]]; !exist {
-			taskRef[tmpStrings[len(tmpStrings)-2]] = true
+		if _, exist := taskRef[task.TaskRole]; !exist {
+			taskRef[task.TaskRole] = true
 		}
 	}
 

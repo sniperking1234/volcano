@@ -17,10 +17,20 @@ limitations under the License.
 package queue
 
 import (
-	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
-
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
+
+const (
+	controllerName = "queue-controller"
+)
+
+type patchOperation struct {
+	Op    string      `json:"op"`
+	Path  string      `json:"path"`
+	Value interface{} `json:"value,omitempty"`
+}
 
 // IsQueueReference return if ownerReference is Queue Kind.
 func IsQueueReference(ref *metav1.OwnerReference) bool {

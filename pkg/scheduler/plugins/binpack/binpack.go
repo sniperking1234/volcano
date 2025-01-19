@@ -21,8 +21,8 @@ import (
 	"strings"
 
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/klog"
-	"k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
+	"k8s.io/klog/v2"
+	k8sFramework "k8s.io/kubernetes/pkg/scheduler/framework"
 
 	"volcano.sh/volcano/pkg/scheduler/api"
 	"volcano.sh/volcano/pkg/scheduler/framework"
@@ -85,7 +85,7 @@ type binpackPlugin struct {
 	weight priorityWeight
 }
 
-//New function returns prioritizePlugin object
+// New function returns prioritizePlugin object
 func New(aruguments framework.Arguments) framework.Plugin {
 	weight := calculateWeight(aruguments)
 	return &binpackPlugin{weight: weight}
@@ -129,7 +129,11 @@ func calculateWeight(args framework.Arguments) priorityWeight {
 		weight.BinPackingMemory = 1
 	}
 
-	resourcesStr := args[BinpackResources]
+	resourcesStr, ok := args[BinpackResources].(string)
+	if !ok {
+		resourcesStr = ""
+	}
+
 	resources := strings.Split(resourcesStr, ",")
 	for _, resource := range resources {
 		resource = strings.TrimSpace(resource)
@@ -147,6 +151,9 @@ func calculateWeight(args framework.Arguments) priorityWeight {
 		weight.BinPackingResources[v1.ResourceName(resource)] = resourceWeight
 	}
 
+	weight.BinPackingResources[v1.ResourceCPU] = weight.BinPackingCPU
+	weight.BinPackingResources[v1.ResourceMemory] = weight.BinPackingMemory
+
 	return weight
 }
 
@@ -155,12 +162,11 @@ func (bp *binpackPlugin) Name() string {
 }
 
 func (bp *binpackPlugin) OnSessionOpen(ssn *framework.Session) {
-	klog.V(4).Infof("Enter binpack plugin ...")
-	if klog.V(4) {
-		defer func() {
-			klog.V(4).Infof("Leaving binpack plugin. %s ...", bp.weight.String())
-		}()
-
+	klog.V(5).Infof("Enter binpack plugin ...")
+	defer func() {
+		klog.V(5).Infof("Leaving binpack plugin. %s ...", bp.weight.String())
+	}()
+	if klog.V(4).Enabled() {
 		notFoundResource := []string{}
 		for resource := range bp.weight.BinPackingResources {
 			found := false
@@ -212,24 +218,19 @@ func BinPackingScore(task *api.TaskInfo, node *api.NodeInfo, weight priorityWeig
 		allocate := allocatable.Get(resource)
 		nodeUsed := used.Get(resource)
 
-		resourceWeight := 0
-		found := false
-		switch resource {
-		case v1.ResourceCPU:
-			resourceWeight = weight.BinPackingCPU
-			found = true
-		case v1.ResourceMemory:
-			resourceWeight = weight.BinPackingMemory
-			found = true
-		default:
-			resourceWeight, found = weight.BinPackingResources[resource]
-		}
+		resourceWeight, found := weight.BinPackingResources[resource]
 		if !found {
 			continue
 		}
 
-		resourceScore := ResourceBinPackingScore(request, allocate, nodeUsed, resourceWeight)
-		klog.V(5).Infof("task %s/%s on node %s resource %s, need %f, used %f, allocatable %f, weight %d, score %f", task.Namespace, task.Name, node.Name, resource, request, nodeUsed, allocate, resourceWeight, resourceScore)
+		resourceScore, err := ResourceBinPackingScore(request, allocate, nodeUsed, resourceWeight)
+		if err != nil {
+			klog.V(4).Infof("task %s/%s cannot binpack node %s: resource: %s is %s, need %f, used %f, allocatable %f",
+				task.Namespace, task.Name, node.Name, resource, err.Error(), request, nodeUsed, allocate)
+			return 0
+		}
+		klog.V(5).Infof("task %s/%s on node %s resource %s, need %f, used %f, allocatable %f, weight %d, score %f",
+			task.Namespace, task.Name, node.Name, resource, request, nodeUsed, allocate, resourceWeight, resourceScore)
 
 		score += resourceScore
 		weightSum += resourceWeight
@@ -239,22 +240,22 @@ func BinPackingScore(task *api.TaskInfo, node *api.NodeInfo, weight priorityWeig
 	if weightSum > 0 {
 		score /= float64(weightSum)
 	}
-	score *= float64(v1alpha1.MaxNodeScore * int64(weight.BinPackingWeight))
+	score *= float64(k8sFramework.MaxNodeScore * int64(weight.BinPackingWeight))
 
 	return score
 }
 
 // ResourceBinPackingScore calculate the binpack score for resource with provided info
-func ResourceBinPackingScore(requested, capacity, used float64, weight int) float64 {
+func ResourceBinPackingScore(requested, capacity, used float64, weight int) (float64, error) {
 	if capacity == 0 || weight == 0 {
-		return 0
+		return 0, nil
 	}
 
 	usedFinally := requested + used
 	if usedFinally > capacity {
-		return 0
+		return 0, fmt.Errorf("not enough")
 	}
 
 	score := usedFinally * float64(weight) / capacity
-	return score
+	return score, nil
 }

@@ -17,69 +17,97 @@ limitations under the License.
 package app
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
-	"regexp"
+	"crypto/x509"
+	"fmt"
 	"strings"
+	"time"
 
-	"k8s.io/api/admissionregistration/v1beta1"
+	v1 "k8s.io/api/admissionregistration/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"volcano.sh/apis/pkg/client/clientset/versioned"
 	"volcano.sh/volcano/cmd/webhook-manager/app/options"
 	"volcano.sh/volcano/pkg/webhooks/router"
 )
 
-func registerWebhookConfig(kubeClient *kubernetes.Clientset, config *options.Config, service *router.AdmissionService, caBundle []byte) {
-	clientConfig := v1beta1.WebhookClientConfig{
-		CABundle: caBundle,
-	}
-	if config.WebhookURL != "" {
-		url := config.WebhookURL + service.Path
-		clientConfig.URL = &url
-		klog.Infof("The URL of webhook manager is <%s>.", url)
-	}
-	if config.WebhookName != "" && config.WebhookNamespace != "" {
-		clientConfig.Service = &v1beta1.ServiceReference{
-			Name:      config.WebhookName,
-			Namespace: config.WebhookNamespace,
-			Path:      &service.Path,
-		}
-		klog.Infof("The service of webhook manager is <%s/%s/%s>.",
-			config.WebhookName, config.WebhookNamespace, service.Path)
-	}
+const volcanoAdmissionPrefix = "volcano-admission-service"
+
+func addCaCertForWebhook(kubeClient *kubernetes.Clientset, service *router.AdmissionService, caBundle []byte) error {
 	if service.MutatingConfig != nil {
-		for i := range service.MutatingConfig.Webhooks {
-			service.MutatingConfig.Webhooks[i].ClientConfig = clientConfig
+		// update MutatingWebhookConfigurations
+		var mutatingWebhookName = volcanoAdmissionPrefix + strings.ReplaceAll(service.Path, "/", "-")
+		var mutatingWebhook *v1.MutatingWebhookConfiguration
+		webhookChanged := false
+		if err := wait.PollUntilContextTimeout(context.Background(), time.Second, 5*time.Minute, true, func(_ context.Context) (done bool, err error) {
+			mutatingWebhook, err = kubeClient.AdmissionregistrationV1().MutatingWebhookConfigurations().Get(context.TODO(), mutatingWebhookName, metav1.GetOptions{})
+			if err != nil {
+				if apierrors.IsNotFound(err) {
+					klog.Errorln(err)
+					return false, nil
+				}
+				return false, fmt.Errorf("failed to get mutating webhook %v", err)
+			}
+			return true, nil
+		}); err != nil {
+			return fmt.Errorf("failed to get mutating webhook %v", err)
 		}
 
-		service.MutatingConfig.ObjectMeta.Name = webhookConfigName(config.WebhookName, service.Path)
-
-		if err := registerMutateWebhook(kubeClient, service.MutatingConfig); err != nil {
-			klog.Errorf("Failed to register mutating admission webhook (%s): %v",
-				service.Path, err)
-		} else {
-			klog.V(3).Infof("Registered mutating webhook for path <%s>.", service.Path)
+		for index := 0; index < len(mutatingWebhook.Webhooks); index++ {
+			if mutatingWebhook.Webhooks[index].ClientConfig.CABundle == nil ||
+				!bytes.Equal(mutatingWebhook.Webhooks[index].ClientConfig.CABundle, caBundle) {
+				mutatingWebhook.Webhooks[index].ClientConfig.CABundle = caBundle
+				webhookChanged = true
+			}
+		}
+		if webhookChanged {
+			if _, err := kubeClient.AdmissionregistrationV1().MutatingWebhookConfigurations().Update(context.TODO(), mutatingWebhook, metav1.UpdateOptions{}); err != nil {
+				return fmt.Errorf("failed to update mutating admission webhooks %v %v", mutatingWebhookName, err)
+			}
 		}
 	}
+
 	if service.ValidatingConfig != nil {
-		for i := range service.ValidatingConfig.Webhooks {
-			service.ValidatingConfig.Webhooks[i].ClientConfig = clientConfig
+		// update ValidatingWebhookConfigurations
+		var validatingWebhookName = volcanoAdmissionPrefix + strings.ReplaceAll(service.Path, "/", "-")
+		var validatingWebhook *v1.ValidatingWebhookConfiguration
+		webhookChanged := false
+		if err := wait.PollUntilContextTimeout(context.Background(), time.Second, 5*time.Minute, true, func(_ context.Context) (done bool, err error) {
+			validatingWebhook, err = kubeClient.AdmissionregistrationV1().ValidatingWebhookConfigurations().Get(context.TODO(), validatingWebhookName, metav1.GetOptions{})
+			if err != nil {
+				if apierrors.IsNotFound(err) {
+					klog.Errorln(err)
+					return false, nil
+				}
+				return false, fmt.Errorf("failed to get validating webhook %v", err)
+			}
+			return true, nil
+		}); err != nil {
+			return fmt.Errorf("failed to get validating webhook %v", err)
 		}
 
-		service.ValidatingConfig.ObjectMeta.Name = webhookConfigName(config.WebhookName, service.Path)
-
-		if err := registerValidateWebhook(kubeClient, service.ValidatingConfig); err != nil {
-			klog.Errorf("Failed to register validating admission webhook (%s): %v",
-				service.Path, err)
-		} else {
-			klog.V(3).Infof("Registered validating webhook for path <%s>.", service.Path)
+		for index := 0; index < len(validatingWebhook.Webhooks); index++ {
+			if validatingWebhook.Webhooks[index].ClientConfig.CABundle == nil ||
+				!bytes.Equal(validatingWebhook.Webhooks[index].ClientConfig.CABundle, caBundle) {
+				validatingWebhook.Webhooks[index].ClientConfig.CABundle = caBundle
+				webhookChanged = true
+			}
+		}
+		if webhookChanged {
+			if _, err := kubeClient.AdmissionregistrationV1().ValidatingWebhookConfigurations().Update(context.TODO(), validatingWebhook, metav1.UpdateOptions{}); err != nil {
+				return fmt.Errorf("failed to update validating admission webhooks %v %v", validatingWebhookName, err)
+			}
 		}
 	}
+
+	return nil
 }
 
 // getKubeClient Get a clientset with restConfig.
@@ -91,7 +119,7 @@ func getKubeClient(restConfig *rest.Config) *kubernetes.Clientset {
 	return clientset
 }
 
-// GetVolcanoClient get a clientset for volcano.
+// getVolcanoClient get a clientset for volcano.
 func getVolcanoClient(restConfig *rest.Config) *versioned.Clientset {
 	clientset, err := versioned.NewForConfig(restConfig)
 	if err != nil {
@@ -104,14 +132,25 @@ func getVolcanoClient(restConfig *rest.Config) *versioned.Clientset {
 // These are passed in as command line for cluster certification. If tls config is passed in, we use the directly
 // defined tls config, else use that defined in kubeconfig.
 func configTLS(config *options.Config, restConfig *rest.Config) *tls.Config {
-	if len(config.CertFile) != 0 && len(config.KeyFile) != 0 {
-		sCert, err := tls.LoadX509KeyPair(config.CertFile, config.KeyFile)
+	if len(config.CertData) != 0 && len(config.KeyData) != 0 {
+		certPool := x509.NewCertPool()
+		certPool.AppendCertsFromPEM(config.CaCertData)
+
+		sCert, err := tls.X509KeyPair(config.CertData, config.KeyData)
 		if err != nil {
 			klog.Fatal(err)
 		}
 
 		return &tls.Config{
 			Certificates: []tls.Certificate{sCert},
+			RootCAs:      certPool,
+			MinVersion:   tls.VersionTLS12,
+			ClientAuth:   tls.VerifyClientCertIfGiven,
+			CipherSuites: []uint16{
+				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			},
 		}
 	}
 
@@ -128,59 +167,4 @@ func configTLS(config *options.Config, restConfig *rest.Config) *tls.Config {
 
 	klog.Fatal("tls: failed to find any tls config data")
 	return &tls.Config{}
-}
-
-func registerMutateWebhook(clientset *kubernetes.Clientset, hook *v1beta1.MutatingWebhookConfiguration) error {
-	client := clientset.AdmissionregistrationV1beta1().MutatingWebhookConfigurations()
-	existing, err := client.Get(context.TODO(), hook.Name, metav1.GetOptions{})
-	if err != nil && !apierrors.IsNotFound(err) {
-		return err
-	}
-	if err == nil && existing != nil {
-		klog.V(4).Infof("Updating MutatingWebhookConfiguration %v", hook)
-		existing.Webhooks = hook.Webhooks
-		if _, err := client.Update(context.TODO(), existing, metav1.UpdateOptions{}); err != nil {
-			return err
-		}
-	} else {
-		klog.V(4).Infof("Creating MutatingWebhookConfiguration %v", hook)
-		if _, err := client.Create(context.TODO(), hook, metav1.CreateOptions{}); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func registerValidateWebhook(clientset *kubernetes.Clientset, hook *v1beta1.ValidatingWebhookConfiguration) error {
-	client := clientset.AdmissionregistrationV1beta1().ValidatingWebhookConfigurations()
-
-	existing, err := client.Get(context.TODO(), hook.Name, metav1.GetOptions{})
-	if err != nil && !apierrors.IsNotFound(err) {
-		return err
-	}
-	if err == nil && existing != nil {
-		existing.Webhooks = hook.Webhooks
-		klog.V(4).Infof("Updating ValidatingWebhookConfiguration %v", hook)
-		if _, err := client.Update(context.TODO(), existing, metav1.UpdateOptions{}); err != nil {
-			return err
-		}
-	} else {
-		klog.V(4).Infof("Creating ValidatingWebhookConfiguration %v", hook)
-		if _, err := client.Create(context.TODO(), hook, metav1.CreateOptions{}); err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-func webhookConfigName(name, path string) string {
-	if name == "" {
-		name = "webhook"
-	}
-
-	re := regexp.MustCompile(`-+`)
-	raw := strings.Join([]string{name, strings.ReplaceAll(path, "/", "-")}, "-")
-	return re.ReplaceAllString(raw, "-")
 }

@@ -17,6 +17,7 @@ limitations under the License.
 package job
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"net/http"
@@ -26,10 +27,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1alpha1 "volcano.sh/apis/pkg/apis/batch/v1alpha1"
+	"volcano.sh/apis/pkg/apis/batch/v1alpha1"
 )
 
 func TestViewJob(t *testing.T) {
@@ -141,7 +142,7 @@ func TestViewJob(t *testing.T) {
 	}
 
 	for i, testcase := range testCases {
-		err := ViewJob()
+		err := ViewJob(context.TODO())
 		if err != nil {
 			t.Errorf("case %d (%s): expected: %v, got %v ", i, testcase.Name, testcase.ExpectValue, err)
 		}

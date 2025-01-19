@@ -1,4 +1,6 @@
-![volcano-logo](docs/images/volcano-horizontal-color.png)
+<a href="https://volcano.sh/">
+    <img src="https://raw.githubusercontent.com/volcano-sh/volcano/master/docs/images/volcano-horizontal-color.png"/>
+</a>
 
 -------
 
@@ -8,12 +10,14 @@
 [![Release](https://img.shields.io/github/release/volcano-sh/volcano.svg)](https://github.com/volcano-sh/volcano/releases)
 [![LICENSE](https://img.shields.io/github/license/volcano-sh/volcano.svg)](https://github.com/volcano-sh/volcano/blob/master/LICENSE)
 [![CII Best Practices](https://bestpractices.coreinfrastructure.org/projects/3012/badge)](https://bestpractices.coreinfrastructure.org/projects/3012)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/volcano-sh/volcano/badge)](https://scorecard.dev/viewer/?uri=github.com/volcano-sh/volcano)
+[![Gurubase](https://img.shields.io/badge/Gurubase-Ask%20Volcano%20Guru-006BFF)](https://gurubase.io/g/volcano)
 
 
-Volcano is a batch system built on Kubernetes. It provides a suite of mechanisms that are commonly required by
+[Volcano](https://volcano.sh/) is a batch system built on Kubernetes. It provides a suite of mechanisms that are commonly required by
 many classes of batch & elastic workload including: machine learning/deep learning, bioinformatics/genomics and
 other "big data" applications. These types of applications typically run on generalized domain frameworks like
-TensorFlow, Spark, PyTorch, MPI, etc, which Volcano integrates with.
+TensorFlow, Spark, Ray, PyTorch, MPI, etc, which Volcano integrates with.
 
 Volcano builds upon a decade and a half of experience running a wide
 variety of high performance workloads at scale using several systems
@@ -30,7 +34,7 @@ refer to [#241](https://github.com/volcano-sh/volcano/issues/241) and [#288](htt
 
 ![cncf_logo](docs/images/cncf-logo.png)
 
-Volcano is a sandbox project of the [Cloud Native Computing Foundation](https://cncf.io/) (CNCF). Please consider joining the CNCF if you are an organization that wants to take an active role in supporting the growth and evolution of the cloud native ecosystem. 
+Volcano is an incubating project of the [Cloud Native Computing Foundation](https://cncf.io/) (CNCF). Please consider joining the CNCF if you are an organization that wants to take an active role in supporting the growth and evolution of the cloud native ecosystem. 
 
 ## Overall Architecture
 
@@ -40,20 +44,28 @@ Volcano is a sandbox project of the [Cloud Native Computing Foundation](https://
 
 - [Intro: Kubernetes Batch Scheduling @ KubeCon 2019 EU](https://sched.co/MPi7)
 - [Volcano 在 Kubernetes 中运行高性能作业实践 @ ArchSummit 2019](https://archsummit.infoq.cn/2019/shenzhen/presentation/1817)
-- [Volcano：基于云原生的高密计算解决方案 @ Huawei Connection 2019](https://agenda.events.huawei.com/2019/cn/minisite/agenda.html#dayTab=day7&tagName=%7B%22language%22%3A%22Cn%22%7D&seminarId=1743)
+- [Volcano：基于云原生的高密计算解决方案 @ Huawei Connection 2019](https://e.huawei.com/cn/material/event/HC/09099dce0070415e9f26ada51b2216d7)
 - [Improving Performance of Deep Learning Workloads With Volcano @ KubeCon 2019 NA](https://sched.co/UaZi)
 - [Batch Capability of Kubernetes Intro @ KubeCon 2019 NA](https://sched.co/Uajv)
-- [Intro: Kubernetes Batch Scheduling @ KubeCon 2019 EU](https://sched.co/MPi7)
+- [Optimizing Knowledge Distillation Training With Volcano @ KubeCon 2021 EU](https://www.youtube.com/watch?v=cDPGmhVcj7Y&t=143s)
+- [Exploration About Mixing Technology of Online Services and Offline Jobs Based On Volcano @ KubeCon 2021 China](https://www.youtube.com/watch?v=daqkUlT5ReY)
+- [Volcano - Cloud Native Batch System for AI, BigData and HPC @ KubeCon 2022 EU](https://www.youtube.com/watch?v=wjy35HfIP_k)
+- [How to Leverage Volcano to Improve the Resource Utilization of AI Pharmaceuticals, Autonomous Driving, and Smart Buildings @ KubeCon 2023 EU](https://www.youtube.com/watch?v=ujHDV5xteqU)
+- [Run Your AI Workloads and Microservices on Kubernetes More Easily and Efficiently @ KubeCon 2023 China](https://www.youtube.com/watch?v=OO7zpyf7fgs)
+- [Optimize LLM Workflows with Smart Infrastructure Enhanced by Volcano @ KubeCon 2024 China](https://www.youtube.com/watch?v=77Qn1-I-muQ)
+- [How Volcano Enable Next Wave of Intelligent Applications @ KubeCon 2024 China](https://www.youtube.com/watch?v=IzR7zJQ8vMw)
+- [Leverage Topology Modeling and Topology-Aware Scheduling to Accelerate LLM Training @ KubeCon 2024 China](https://www.youtube.com/watch?v=IB54LHQQ8lI)
 
 
 ## Ecosystem
 
-- [spark-operator](https://github.com/GoogleCloudPlatform/spark-on-k8s-operator/blob/master/docs/volcano-integration.md)
-- [kubeflow/tf-operator](https://www.kubeflow.org/docs/use-cases/job-scheduling/)
-- [kubeflow/arena](https://github.com/kubeflow/arena/blob/master/docs/userguide/12-volcanojob.md)
+- [spark-operator](https://www.kubeflow.org/docs/components/spark-operator/user-guide/volcano-integration/)
+- [kubeflow/training-operator](https://www.kubeflow.org/docs/components/training/user-guides/job-scheduling/)
+- [kubeflow/arena](https://github.com/kubeflow/arena/blob/master/docs/training/volcanojob/volcanojob.md)
 - [Horovod/MPI](https://github.com/volcano-sh/volcano/tree/master/example/integrations/mpi)
 - [paddlepaddle](https://github.com/volcano-sh/volcano/tree/master/example/integrations/paddlepaddle)
 - [cromwell](https://github.com/broadinstitute/cromwell/blob/develop/docs/backends/Volcano.md)
+- [KubeRay](https://docs.ray.io/en/master/cluster/kubernetes/k8s-ecosystem/volcano.html)
 
 ## Quick Start Guide
 
@@ -65,7 +77,7 @@ Volcano is a sandbox project of the [Cloud Native Computing Foundation](https://
 You can try Volcano by one of the following two ways.
 
 Note: 
-* For Kubernetes v1.16+ use CRDs under config/crd/bases (recommended)
+* For Kubernetes v1.17+ use CRDs under config/crd/bases (recommended)
 * For Kubernetes versions < v1.16 use CRDs under config/crd/v1beta1 (deprecated)
 
 ### Install with YAML files
@@ -73,11 +85,7 @@ Note:
 Install Volcano on an existing Kubernetes cluster. This way is both available for x86_64 and arm64 architecture.
 
 ```
-For x86_64:
 kubectl apply -f https://raw.githubusercontent.com/volcano-sh/volcano/master/installer/volcano-development.yaml
-
-For arm64:
-kubectl apply -f https://raw.githubusercontent.com/volcano-sh/volcano/master/installer/volcano-development-arm64.yaml
 ```
 
 Enjoy! Volcano will create the following resources in `volcano-system` namespace.
@@ -108,6 +116,24 @@ job.batch/volcano-admission-init   1/1           48s        96s
 
 ```
 
+### Install via helm
+
+To install official release, please visit to [helm-charts](https://github.com/volcano-sh/helm-charts) for details.
+
+```bash
+helm repo add volcano-sh https://volcano-sh.github.io/helm-charts
+helm install volcano volcano-sh/volcano -n volcano-system --create-namespace
+```
+
+Install from source code for developers:
+
+```bash
+helm install volcano installer/helm/chart/volcano --namespace volcano-system --create-namespace
+
+# list helm release
+helm list -n volcano-system
+```
+
 ### Install from code
 
 If you don't have a kubernetes cluster, try one-click install from code base:
@@ -127,13 +153,35 @@ make TAG=latest generate-yaml
 kubectl create -f _output/release/volcano-monitoring-latest.yaml
 ```
 
+### Install dashboard
+
+Please follow the guide [Volcano Dashboard](https://github.com/volcano-sh/dashboard#volcano-dashboard) to install volcano dashboard.
+
+## Kubernetes compatibility
+
+|                       | Kubernetes 1.17 | Kubernetes 1.18 | Kubernetes 1.19 | Kubernetes 1.20 | Kubernetes 1.21 | Kubernetes 1.22 | Kubernetes 1.23 | Kubernetes 1.24 | Kubernetes 1.25 | Kubernetes 1.26 | Kubernetes 1.27 | Kubernetes 1.28 | Kubernetes 1.29 |Kubernetes 1.30 |Kubernetes 1.31 |
+|-----------------------|-----------------|-----------------|-----------------|-----------------|-----------------|-----------------|-----------------|-----------------|-----------------|-----------------|-----------------|-----------------|-----------------|---------------|---------------|
+| Volcano v1.6          | ✓               | ✓               | ✓               | ✓               | ✓               | ✓               | ✓               | -               | -               | -               | -               | -               | -               |-              |-              |
+| Volcano v1.7          | -               | -               | ✓               | ✓               | ✓               | ✓               | ✓               | ✓               | ✓               | ✓               | ✓               | ✓               | -               |_              |_              |
+| Volcano v1.8          | -               | -               | ✓               | ✓               | ✓               | ✓               | ✓               | ✓               | ✓               | ✓               | ✓               | ✓               | -               |-              |_              |
+| Volcano v1.9          | -               | -               | -               | -               | ✓               | ✓               | ✓               | ✓               | ✓               | ✓               | ✓               | ✓               | ✓               |-              |_              |
+| Volcano v1.10         | -               | -               | -               | -               | ✓               | ✓               | ✓               | ✓               | ✓               | ✓               | ✓               | ✓               | ✓               |✓              |_              |
+| Volcano HEAD (master) | -               | -               | -               | -               | ✓               | ✓               | ✓               | ✓               | ✓               | ✓               | ✓               | ✓               | ✓               |✓              |✓              |
+
+Key:
+* `✓` Volcano and the Kubernetes version are exactly compatible.
+* `+` Volcano has features or API objects that may not be present in the Kubernetes version.
+* `-` The Kubernetes version has features or API objects that Volcano can't use.
+
+
 ## Meeting
 
 Community weekly meeting for Asia: 15:00 - 16:00 (UTC+8) Friday. ([Convert to your timezone.](https://www.thetimezoneconverter.com/?t=10%3A00&tz=GMT%2B8&))
 
 Community biweekly meeting for America: 08:30 - 09:30 (UTC-8) Thursday. ([Convert to your timezone.](https://www.thetimezoneconverter.com/?t=10%3A00&tz=GMT%2B8&))
 
-Community biweekly meeting for Europe: 11:00 - 12:00 (UTC+1) Thursday. ([Convert to your timezone.](https://www.thetimezoneconverter.com/?t=10%3A00&tz=GMT%2B8&))
+Community meeting for Europe is ongoing on demand now. If you have some ideas or topics to discuss, please leave message
+in the [slack](https://cloud-native.slack.com/archives/C011GJDQS0N). Maintainers will contact with you and book an open meeting for that.
 
 Resources:
 - [Meeting notes and agenda](https://docs.google.com/document/d/1YLbF8zjZBiR9PbXQPB22iuc_L0Oui5A1lddVfRnZrqs/edit)
@@ -144,6 +192,8 @@ Resources:
 
 If you have any question, feel free to reach out to us in the following ways:
 
-[Volcano Slack Channel](https://volcano-sh.slack.com)
+[Volcano Slack Channel](https://cloud-native.slack.com/archives/C011GJDQS0N) | [Join](https://slack.cncf.io/)
 
 [Mailing List](https://groups.google.com/forum/#!forum/volcano-sh)
+
+Wechat: Add WeChat account `k8s2222` (华为云小助手2号) to let her pull you into the group.

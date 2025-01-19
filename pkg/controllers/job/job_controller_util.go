@@ -18,18 +18,24 @@ package job
 
 import (
 	"fmt"
+	"sort"
+	"strconv"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/klog"
+	quotav1 "k8s.io/apiserver/pkg/quota/v1"
+	"k8s.io/klog/v2"
 
 	batch "volcano.sh/apis/pkg/apis/batch/v1alpha1"
 	"volcano.sh/apis/pkg/apis/bus/v1alpha1"
 	"volcano.sh/apis/pkg/apis/helpers"
 	schedulingv2 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 	"volcano.sh/volcano/pkg/controllers/apis"
+	jobcache "volcano.sh/volcano/pkg/controllers/cache"
 	jobhelpers "volcano.sh/volcano/pkg/controllers/job/helpers"
+	"volcano.sh/volcano/pkg/controllers/job/state"
+	"volcano.sh/volcano/pkg/controllers/util"
 )
 
 // MakePodName append podname,jobname,taskName and index and returns the string.
@@ -56,6 +62,11 @@ func createJobPod(job *batch.Job, template *v1.PodTemplateSpec, topologyPolicy b
 	// If no scheduler name in Pod, use scheduler name from Job.
 	if len(pod.Spec.SchedulerName) == 0 {
 		pod.Spec.SchedulerName = job.Spec.SchedulerName
+	}
+
+	// If no priority class specified in pod template, use priority class specified in job
+	if len(pod.Spec.PriorityClassName) == 0 && len(job.Spec.PriorityClassName) != 0 {
+		pod.Spec.PriorityClassName = job.Spec.PriorityClassName
 	}
 
 	volumeMap := make(map[string]string)
@@ -96,12 +107,16 @@ func createJobPod(job *batch.Job, template *v1.PodTemplateSpec, topologyPolicy b
 		pod.Annotations = make(map[string]string)
 	}
 
+	index := strconv.Itoa(ix)
+	pod.Annotations[batch.TaskIndex] = index
 	pod.Annotations[batch.TaskSpecKey] = tsKey
-	pod.Annotations[schedulingv2.KubeGroupNameAnnotationKey] = job.Name
+	pgName := job.Name + "-" + string(job.UID)
+	pod.Annotations[schedulingv2.KubeGroupNameAnnotationKey] = pgName
 	pod.Annotations[batch.JobNameKey] = job.Name
 	pod.Annotations[batch.QueueNameKey] = job.Spec.Queue
 	pod.Annotations[batch.JobVersion] = fmt.Sprintf("%d", job.Status.Version)
 	pod.Annotations[batch.PodTemplateKey] = fmt.Sprintf("%s-%s", job.Name, template.Name)
+	pod.Annotations[batch.JobRetryCountKey] = strconv.Itoa(int(job.Status.RetryCount))
 
 	if topologyPolicy != "" {
 		pod.Annotations[schedulingv2.NumaPolicyKey] = string(topologyPolicy)
@@ -110,6 +125,9 @@ func createJobPod(job *batch.Job, template *v1.PodTemplateSpec, topologyPolicy b
 	if len(job.Annotations) > 0 {
 		if value, found := job.Annotations[schedulingv2.PodPreemptable]; found {
 			pod.Annotations[schedulingv2.PodPreemptable] = value
+		}
+		if value, found := job.Annotations[schedulingv2.CooldownTime]; found {
+			pod.Annotations[schedulingv2.CooldownTime] = value
 		}
 		if value, found := job.Annotations[schedulingv2.RevocableZone]; found {
 			pod.Annotations[schedulingv2.RevocableZone] = value
@@ -127,12 +145,17 @@ func createJobPod(job *batch.Job, template *v1.PodTemplateSpec, topologyPolicy b
 	}
 
 	// Set pod labels for Service.
+	pod.Labels[batch.TaskIndex] = index
 	pod.Labels[batch.JobNameKey] = job.Name
+	pod.Labels[batch.TaskSpecKey] = tsKey
 	pod.Labels[batch.JobNamespaceKey] = job.Namespace
 	pod.Labels[batch.QueueNameKey] = job.Spec.Queue
 	if len(job.Labels) > 0 {
 		if value, found := job.Labels[schedulingv2.PodPreemptable]; found {
 			pod.Labels[schedulingv2.PodPreemptable] = value
+		}
+		if value, found := job.Labels[schedulingv2.CooldownTime]; found {
+			pod.Labels[schedulingv2.CooldownTime] = value
 		}
 	}
 
@@ -144,19 +167,39 @@ func createJobPod(job *batch.Job, template *v1.PodTemplateSpec, topologyPolicy b
 	return pod
 }
 
-func applyPolicies(job *batch.Job, req *apis.Request) v1alpha1.Action {
-	if len(req.Action) != 0 {
-		return req.Action
+func applyPolicies(job *batch.Job, req *apis.Request) (delayAct *delayAction) {
+	delayAct = &delayAction{
+		jobKey:   jobcache.JobKeyByReq(req),
+		event:    req.Event,
+		taskName: req.TaskName,
+		podName:  req.PodName,
+		podUID:   req.PodUID,
+		// default action is sync job
+		action: v1alpha1.SyncJobAction,
 	}
 
-	if req.Event == v1alpha1.OutOfSyncEvent {
-		return v1alpha1.SyncJobAction
+	if len(req.Action) != 0 {
+		delayAct.action = req.Action
+		return
+	}
+
+	// If the event is an internal event, we do not need to perform any action
+	if isInternalEvent(req.Event) {
+		return
+	}
+
+	// Solve the scenario: When pod events accumulate and vcjobs with the same name are frequently created,
+	// it is easy for the pod to cause abnormal status of the newly created vcjob with the same name.
+	if len(req.JobUid) != 0 && job != nil && req.JobUid != job.UID {
+		klog.V(2).Infof("The req belongs to job(%s/%s) and job uid is %v, but the uid of job(%s/%s) is %v in cache, perform %v action",
+			req.Namespace, req.JobName, req.JobUid, job.Namespace, job.Name, job.UID, v1alpha1.SyncJobAction)
+		return
 	}
 
 	// For all the requests triggered from discarded job resources will perform sync action instead
 	if req.JobVersion < job.Status.Version {
 		klog.Infof("Request %s is outdated, will perform sync instead.", req)
-		return v1alpha1.SyncJobAction
+		return
 	}
 
 	// Overwrite Job level policies
@@ -169,13 +212,28 @@ func applyPolicies(job *batch.Job, req *apis.Request) v1alpha1.Action {
 
 					if len(policyEvents) > 0 && len(req.Event) > 0 {
 						if checkEventExist(policyEvents, req.Event) || checkEventExist(policyEvents, v1alpha1.AnyEvent) {
-							return policy.Action
+							// Check if the event requires a timeout configuration, and whether a timeout policy is specified.
+							// If the event does not require a timeout (shouldConfigureTimeout returns false),
+							// or if a timeout policy is already set (policy.Timeout != nil),
+							// execute the corresponding delay action and set the delay time based on the policy's Timeout.Duration.
+							// If a timeout policy is specified, set the delay to the timeout duration.
+							if !shouldConfigureTimeout(req.Event) || policy.Timeout != nil {
+								delayAct.action = policy.Action
+								if policy.Timeout != nil {
+									delayAct.delay = policy.Timeout.Duration
+								}
+								return
+							}
 						}
 					}
 
 					// 0 is not an error code, is prevented in validation admission controller
 					if policy.ExitCode != nil && *policy.ExitCode == req.ExitCode {
-						return policy.Action
+						delayAct.action = policy.Action
+						if policy.Timeout != nil {
+							delayAct.delay = policy.Timeout.Duration
+						}
+						return
 					}
 				}
 				break
@@ -189,17 +247,31 @@ func applyPolicies(job *batch.Job, req *apis.Request) v1alpha1.Action {
 
 		if len(policyEvents) > 0 && len(req.Event) > 0 {
 			if checkEventExist(policyEvents, req.Event) || checkEventExist(policyEvents, v1alpha1.AnyEvent) {
-				return policy.Action
+				if !(shouldConfigureTimeout(req.Event) && policy.Timeout == nil) {
+					delayAct.action = policy.Action
+					if policy.Timeout != nil {
+						delayAct.delay = policy.Timeout.Duration
+					}
+					return
+				}
 			}
 		}
 
 		// 0 is not an error code, is prevented in validation admission controller
 		if policy.ExitCode != nil && *policy.ExitCode == req.ExitCode {
-			return policy.Action
+			delayAct.action = policy.Action
+			if policy.Timeout != nil {
+				delayAct.delay = policy.Timeout.Duration
+			}
+			return
 		}
 	}
 
-	return v1alpha1.SyncJobAction
+	return
+}
+
+func shouldConfigureTimeout(event v1alpha1.Event) bool {
+	return event == v1alpha1.PodPendingEvent
 }
 
 func getEventlist(policy batch.LifecyclePolicy) []v1alpha1.Event {
@@ -217,34 +289,6 @@ func checkEventExist(policyEvents []v1alpha1.Event, reqEvent v1alpha1.Event) boo
 		}
 	}
 	return false
-
-}
-
-func addResourceList(list, req, limit v1.ResourceList) {
-	for name, quantity := range req {
-
-		if value, ok := list[name]; !ok {
-			list[name] = quantity.DeepCopy()
-		} else {
-			value.Add(quantity)
-			list[name] = value
-		}
-	}
-
-	if req != nil {
-		return
-	}
-
-	// If Requests is omitted for a container,
-	// it defaults to Limits if that is explicitly specified.
-	for name, quantity := range limit {
-		if value, ok := list[name]; !ok {
-			list[name] = quantity.DeepCopy()
-		} else {
-			value.Add(quantity)
-			list[name] = value
-		}
-	}
 }
 
 // TaskPriority structure.
@@ -266,12 +310,154 @@ func (p TasksPriority) Less(i, j int) bool {
 func (p TasksPriority) Swap(i, j int) { p[i], p[j] = p[j], p[i] }
 
 func isControlledBy(obj metav1.Object, gvk schema.GroupVersionKind) bool {
-	controlerRef := metav1.GetControllerOf(obj)
-	if controlerRef == nil {
+	controllerRef := metav1.GetControllerOf(obj)
+	if controllerRef == nil {
 		return false
 	}
-	if controlerRef.APIVersion == gvk.GroupVersion().String() && controlerRef.Kind == gvk.Kind {
+	if controllerRef.APIVersion == gvk.GroupVersion().String() && controllerRef.Kind == gvk.Kind {
 		return true
 	}
 	return false
+}
+
+// CalcFirstCountResources return the first count tasks resource, sorted by priority
+func (p TasksPriority) CalcFirstCountResources(count int32) v1.ResourceList {
+	sort.Sort(p)
+	minReq := v1.ResourceList{}
+
+	for _, task := range p {
+		if count <= task.Replicas {
+			minReq = quotav1.Add(minReq, calTaskRequests(&v1.Pod{Spec: task.Template.Spec}, count))
+			break
+		} else {
+			minReq = quotav1.Add(minReq, calTaskRequests(&v1.Pod{Spec: task.Template.Spec}, task.Replicas))
+			count -= task.Replicas
+		}
+	}
+	return minReq
+}
+
+// CalcPGMinResources sums up all task's min available; if not enough, then fill up to jobMinAvailable via task's replicas
+func (p TasksPriority) CalcPGMinResources(jobMinAvailable int32) v1.ResourceList {
+	sort.Sort(p)
+	minReq := v1.ResourceList{}
+	podCnt := int32(0)
+
+	// 1. first sum up those tasks whose MinAvailable is set
+	for _, task := range p {
+		if task.MinAvailable == nil { // actually, all task's min available is set by webhook
+			continue
+		}
+
+		validReplics := *task.MinAvailable
+		if left := jobMinAvailable - podCnt; left < validReplics {
+			validReplics = left
+		}
+		minReq = quotav1.Add(minReq, calTaskRequests(&v1.Pod{Spec: task.Template.Spec}, validReplics))
+		podCnt += validReplics
+		if podCnt >= jobMinAvailable {
+			break
+		}
+	}
+
+	if podCnt >= jobMinAvailable {
+		return minReq
+	}
+
+	// 2. fill up the count of pod to jobMinAvailable with tasks whose replicas is not used up, higher priority first
+	leftCnt := jobMinAvailable - podCnt
+	for _, task := range p {
+		left := task.Replicas
+		if task.MinAvailable != nil {
+			if *task.MinAvailable == task.Replicas {
+				continue
+			} else {
+				left = task.Replicas - *task.MinAvailable
+			}
+		}
+
+		if leftCnt >= left {
+			minReq = quotav1.Add(minReq, calTaskRequests(&v1.Pod{Spec: task.Template.Spec}, left))
+			leftCnt -= left
+		} else {
+			minReq = quotav1.Add(minReq, calTaskRequests(&v1.Pod{Spec: task.Template.Spec}, leftCnt))
+			leftCnt = 0
+		}
+		if leftCnt <= 0 {
+			break
+		}
+	}
+	return minReq
+}
+
+// calTaskRequests returns requests resource with validReplica replicas
+func calTaskRequests(pod *v1.Pod, validReplica int32) v1.ResourceList {
+	minReq := v1.ResourceList{}
+	usage := *util.GetPodQuotaUsage(pod)
+	for i := int32(0); i < validReplica; i++ {
+		minReq = quotav1.Add(minReq, usage)
+	}
+	return minReq
+}
+
+// isInternalEvent checks if the event is an internal event
+func isInternalEvent(event v1alpha1.Event) bool {
+	switch event {
+	case v1alpha1.OutOfSyncEvent,
+		v1alpha1.CommandIssuedEvent,
+		v1alpha1.PodRunningEvent:
+		return true
+	default:
+		return false
+	}
+}
+
+// isInternalAction checks if the action is an internal action
+func isInternalAction(action v1alpha1.Action) bool {
+	switch action {
+	case v1alpha1.SyncJobAction,
+		v1alpha1.EnqueueAction,
+		v1alpha1.SyncQueueAction,
+		v1alpha1.OpenQueueAction,
+		v1alpha1.CloseQueueAction:
+		return true
+	default:
+		return false
+	}
+}
+
+func GetStateAction(delayAct *delayAction) state.Action {
+	action := state.Action{Action: delayAct.action}
+
+	if delayAct.action == v1alpha1.RestartTaskAction {
+		action.Target = state.Target{TaskName: delayAct.taskName, Type: state.TargetTypeTask}
+	} else if delayAct.action == v1alpha1.RestartPodAction {
+		action.Target = state.Target{TaskName: delayAct.taskName, PodName: delayAct.podName, Type: state.TargetTypePod}
+	}
+
+	return action
+}
+
+type ActionType int
+
+const (
+	JobAction ActionType = iota
+	TaskAction
+	PodAction
+)
+
+func GetActionType(action v1alpha1.Action) ActionType {
+	switch action {
+	case v1alpha1.AbortJobAction,
+		v1alpha1.RestartJobAction,
+		v1alpha1.TerminateJobAction,
+		v1alpha1.CompleteJobAction,
+		v1alpha1.ResumeJobAction:
+		return JobAction
+	case v1alpha1.RestartTaskAction:
+		return TaskAction
+	case v1alpha1.RestartPodAction:
+		return PodAction
+	}
+	return JobAction
 }

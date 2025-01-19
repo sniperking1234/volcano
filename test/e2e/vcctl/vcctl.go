@@ -20,7 +20,7 @@ import (
 	"os"
 	"strings"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
 
@@ -34,12 +34,17 @@ Usage:
 Available Commands:
   help        Help about any command
   job         vcctl command line operation job
+  jobflow     vcctl command line operation jobflow
+  jobtemplate vcctl command line operation jobtemplate
+  pod         vcctl command line operation pod
   queue       Queue Operations
   version     Print the version information
 
 Flags:
   -h, --help                           help for vcctl
       --log-flush-frequency duration   Maximum number of seconds between log flushes (default 5s)
+  -v, --v Level                        number for the log level verbosity
+      --vmodule moduleSpec             comma-separated list of pattern=N settings for file-filtered logging (only works for the default text log format)
 
 Use "vcctl [command] --help" for more information about a command.
 
@@ -70,6 +75,8 @@ Flags:
 
 Global Flags:
       --log-flush-frequency duration   Maximum number of seconds between log flushes (default 5s)
+  -v, --v Level                        number for the log level verbosity
+      --vmodule moduleSpec             comma-separated list of pattern=N settings for file-filtered logging (only works for the default text log format)
 
 Use "vcctl job [command] --help" for more information about a command.
 
@@ -94,11 +101,14 @@ Flags:
   -k, --kubeconfig string   (optional) absolute path to the kubeconfig file (default "` + kubeConfig + `")
   -s, --master string       the address of apiserver
   -n, --namespace string    the namespace of job (default "default")
+  -q, --queue string        list job with specified queue name
   -S, --scheduler string    list job with specified scheduler name
       --selector string     fuzzy matching jobName
 
 Global Flags:
       --log-flush-frequency duration   Maximum number of seconds between log flushes (default 5s)
+  -v, --v Level                        number for the log level verbosity
+      --vmodule moduleSpec             comma-separated list of pattern=N settings for file-filtered logging (only works for the default text log format)
 
 `
 		command := []string{"job", "list", "--help"}
@@ -124,6 +134,8 @@ Flags:
 
 Global Flags:
       --log-flush-frequency duration   Maximum number of seconds between log flushes (default 5s)
+  -v, --v Level                        number for the log level verbosity
+      --vmodule moduleSpec             comma-separated list of pattern=N settings for file-filtered logging (only works for the default text log format)
 
 `
 		command := []string{"job", "suspend", "-n", "job1", "--help"}
@@ -149,6 +161,8 @@ Flags:
 
 Global Flags:
       --log-flush-frequency duration   Maximum number of seconds between log flushes (default 5s)
+  -v, --v Level                        number for the log level verbosity
+      --vmodule moduleSpec             comma-separated list of pattern=N settings for file-filtered logging (only works for the default text log format)
 
 `
 		command := []string{"job", "resume", "-n", "job1", "--help"}
@@ -181,6 +195,8 @@ Flags:
 
 Global Flags:
       --log-flush-frequency duration   Maximum number of seconds between log flushes (default 5s)
+  -v, --v Level                        number for the log level verbosity
+      --vmodule moduleSpec             comma-separated list of pattern=N settings for file-filtered logging (only works for the default text log format)
 
 `
 		command := []string{"job", "run", "--help"}

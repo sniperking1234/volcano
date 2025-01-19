@@ -18,15 +18,22 @@ package apis
 
 import (
 	"fmt"
+
+	"k8s.io/apimachinery/pkg/types"
+
 	"volcano.sh/apis/pkg/apis/bus/v1alpha1"
+	flowv1alpha1 "volcano.sh/apis/pkg/apis/flow/v1alpha1"
 )
 
-//Request struct.
+// Request struct.
 type Request struct {
 	Namespace string
 	JobName   string
+	JobUid    types.UID
 	TaskName  string
 	QueueName string
+	PodName   string
+	PodUID    types.UID
 
 	Event      v1alpha1.Event
 	ExitCode   int32
@@ -37,6 +44,22 @@ type Request struct {
 // String function returns the request in string format.
 func (r Request) String() string {
 	return fmt.Sprintf(
-		"Queue: %s, Job: %s/%s, Task:%s, Event:%s, ExitCode:%d, Action:%s, JobVersion: %d",
-		r.QueueName, r.Namespace, r.JobName, r.TaskName, r.Event, r.ExitCode, r.Action, r.JobVersion)
+		"Queue: %s, Job: %s/%s, Task:%s, Pod:%s, Event:%s, ExitCode:%d, Action:%s, JobVersion: %d",
+		r.QueueName, r.Namespace, r.JobName, r.TaskName, r.PodName, r.Event, r.ExitCode, r.Action, r.JobVersion)
+}
+
+// FlowRequest The object of sync operation, used for JobFlow and JobTemplate
+type FlowRequest struct {
+	Namespace       string
+	JobFlowName     string
+	JobTemplateName string
+
+	Action flowv1alpha1.Action
+	Event  flowv1alpha1.Event
+}
+
+func (r FlowRequest) String() string {
+	return fmt.Sprintf(
+		"JobTemplate: %s, JobFlow: %s/%s",
+		r.JobTemplateName, r.JobFlowName, r.Namespace)
 }

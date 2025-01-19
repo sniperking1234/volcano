@@ -1,23 +1,24 @@
 package predicates
 
 import (
-	v1 "k8s.io/api/core/v1"
 	"testing"
+
+	v1 "k8s.io/api/core/v1"
+
 	"volcano.sh/volcano/pkg/scheduler/api"
-	"volcano.sh/volcano/pkg/scheduler/util"
 )
 
 func buildTask(name, cpu, memory, gpu string) *api.TaskInfo {
 	return &api.TaskInfo{
 		Name:   name,
-		Resreq: api.NewResource(util.BuildResourceListWithGPU(cpu, memory, gpu)),
+		Resreq: api.NewResource(api.BuildResourceListWithGPU(cpu, memory, gpu)),
 	}
 }
 
 func buildNode(name, cpu, memory, gpu string) *api.NodeInfo {
 	return &api.NodeInfo{
 		Name: name,
-		Idle: api.NewResource(util.BuildResourceListWithGPU(cpu, memory, gpu)),
+		Idle: api.NewResource(api.BuildResourceListWithGPU(cpu, memory, gpu)),
 	}
 }
 
@@ -43,7 +44,7 @@ func Test_checkNodeResourceIsProportional(t *testing.T) {
 	tests := []struct {
 		name    string
 		args    args
-		want    bool
+		want    int
 		wantErr bool
 	}{
 		{
@@ -53,7 +54,7 @@ func Test_checkNodeResourceIsProportional(t *testing.T) {
 				node:         n1,
 				proportional: proportional,
 			},
-			true,
+			api.Success,
 			false,
 		},
 		{
@@ -63,7 +64,7 @@ func Test_checkNodeResourceIsProportional(t *testing.T) {
 				node:         n1,
 				proportional: proportional,
 			},
-			false,
+			api.UnschedulableAndUnresolvable,
 			true,
 		},
 		{
@@ -73,7 +74,7 @@ func Test_checkNodeResourceIsProportional(t *testing.T) {
 				node:         n1,
 				proportional: proportional,
 			},
-			true,
+			api.Success,
 			false,
 		},
 		{
@@ -83,7 +84,7 @@ func Test_checkNodeResourceIsProportional(t *testing.T) {
 				node:         n2,
 				proportional: proportional,
 			},
-			true,
+			api.Success,
 			false,
 		},
 	}
@@ -94,7 +95,7 @@ func Test_checkNodeResourceIsProportional(t *testing.T) {
 				t.Errorf("checkNodeResourceIsProportional() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if got != tt.want {
+			if got.Code != tt.want {
 				t.Errorf("checkNodeResourceIsProportional() got = %v, want %v", got, tt.want)
 			}
 		})

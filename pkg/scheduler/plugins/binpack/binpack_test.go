@@ -21,16 +21,14 @@ import (
 	"math"
 	"testing"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/record"
 
 	schedulingv1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 	"volcano.sh/volcano/pkg/scheduler/api"
-	"volcano.sh/volcano/pkg/scheduler/cache"
 	"volcano.sh/volcano/pkg/scheduler/conf"
 	"volcano.sh/volcano/pkg/scheduler/framework"
+	"volcano.sh/volcano/pkg/scheduler/uthelper"
 	"volcano.sh/volcano/pkg/scheduler/util"
 )
 
@@ -43,12 +41,12 @@ func TestArguments(t *testing.T) {
 	defer framework.CleanupPluginBuilders()
 
 	arguments := framework.Arguments{
-		"binpack.weight":                    "10",
-		"binpack.cpu":                       "5",
-		"binpack.memory":                    "2",
+		"binpack.weight":                    10,
+		"binpack.cpu":                       5,
+		"binpack.memory":                    2,
 		"binpack.resources":                 "nvidia.com/gpu, example.com/foo",
-		"binpack.resources.nvidia.com/gpu":  "7",
-		"binpack.resources.example.com/foo": "-3",
+		"binpack.resources.nvidia.com/gpu":  7,
+		"binpack.resources.example.com/foo": -3,
 	}
 
 	builder, ok := framework.GetPluginBuilder(PluginName)
@@ -82,6 +80,14 @@ func TestArguments(t *testing.T) {
 			if weight != 1 {
 				t.Errorf("example.com/foo should be 1, but not %v", weight)
 			}
+		case v1.ResourceCPU:
+			if weight != 5 {
+				t.Errorf("%v should be 5, but not %v", v1.ResourceCPU, weight)
+			}
+		case v1.ResourceMemory:
+			if weight != 2 {
+				t.Errorf("%v should be 2, but not %v", v1.ResourceMemory, weight)
+			}
 		default:
 			t.Errorf("resource %s with weight %d should not appear", name, weight)
 		}
@@ -93,79 +99,53 @@ func addResource(resourceList v1.ResourceList, name v1.ResourceName, need string
 }
 
 func TestNode(t *testing.T) {
-	framework.RegisterPluginBuilder(PluginName, New)
-	defer framework.CleanupPluginBuilders()
-
 	GPU := v1.ResourceName("nvidia.com/gpu")
 	FOO := v1.ResourceName("example.com/foo")
 
-	p1 := util.BuildPod("c1", "p1", "n1", v1.PodPending, util.BuildResourceList("1", "1Gi"), "pg1", make(map[string]string), make(map[string]string))
-	p2 := util.BuildPod("c1", "p2", "n3", v1.PodPending, util.BuildResourceList("1.5", "0Gi"), "pg1", make(map[string]string), make(map[string]string))
-	p3 := util.BuildPod("c1", "p3", "", v1.PodPending, util.BuildResourceList("2", "10Gi"), "pg1", make(map[string]string), make(map[string]string))
+	p1 := util.BuildPod("c1", "p1", "n1", v1.PodPending, api.BuildResourceList("1", "1Gi"), "pg1", make(map[string]string), make(map[string]string))
+	p2 := util.BuildPod("c1", "p2", "n3", v1.PodPending, api.BuildResourceList("1.5", "0Gi"), "pg1", make(map[string]string), make(map[string]string))
+	p3 := util.BuildPod("c1", "p3", "", v1.PodPending, api.BuildResourceList("2", "10Gi"), "pg1", make(map[string]string), make(map[string]string))
 	addResource(p3.Spec.Containers[0].Resources.Requests, GPU, "2")
-	p4 := util.BuildPod("c1", "p4", "", v1.PodPending, util.BuildResourceList("3", "4Gi"), "pg1", make(map[string]string), make(map[string]string))
+	p4 := util.BuildPod("c1", "p4", "", v1.PodPending, api.BuildResourceList("3", "4Gi"), "pg1", make(map[string]string), make(map[string]string))
 	addResource(p4.Spec.Containers[0].Resources.Requests, FOO, "3")
 
-	n1 := util.BuildNode("n1", util.BuildResourceList("2", "4Gi"), make(map[string]string))
-	n2 := util.BuildNode("n2", util.BuildResourceList("4", "16Gi"), make(map[string]string))
+	n1 := util.BuildNode("n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), make(map[string]string))
+	n2 := util.BuildNode("n2", api.BuildResourceList("4", "16Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), make(map[string]string))
 	addResource(n2.Status.Allocatable, GPU, "4")
-	n3 := util.BuildNode("n3", util.BuildResourceList("2", "4Gi"), make(map[string]string))
+	n3 := util.BuildNode("n3", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), make(map[string]string))
 	addResource(n3.Status.Allocatable, FOO, "16")
 
-	pg1 := &schedulingv1.PodGroup{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "pg1",
-			Namespace: "c1",
-		},
-		Spec: schedulingv1.PodGroupSpec{
-			Queue: "c1",
-		},
-	}
-	queue1 := &schedulingv1.Queue{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "c1",
-		},
-		Spec: schedulingv1.QueueSpec{
-			Weight: 1,
-		},
-	}
+	pg1 := util.BuildPodGroup("pg1", "c1", "c1", 0, nil, "")
+	queue1 := util.BuildQueue("c1", 1, nil)
 
 	tests := []struct {
-		name      string
-		podGroups []*schedulingv1.PodGroup
-		pods      []*v1.Pod
-		nodes     []*v1.Node
-		queues    []*schedulingv1.Queue
+		uthelper.TestCommonStruct
 		arguments framework.Arguments
 		expected  map[string]map[string]float64
 	}{
 		{
-			name: "single job",
-			podGroups: []*schedulingv1.PodGroup{
-				pg1,
-			},
-			queues: []*schedulingv1.Queue{
-				queue1,
-			},
-			pods: []*v1.Pod{
-				p1, p2, p3, p4,
-			},
-			nodes: []*v1.Node{
-				n1, n2, n3,
+			TestCommonStruct: uthelper.TestCommonStruct{
+
+				Name:      "single job",
+				Plugins:   map[string]framework.PluginBuilder{PluginName: New},
+				PodGroups: []*schedulingv1.PodGroup{pg1},
+				Queues:    []*schedulingv1.Queue{queue1},
+				Pods:      []*v1.Pod{p1, p2, p3, p4},
+				Nodes:     []*v1.Node{n1, n2, n3},
 			},
 			arguments: framework.Arguments{
-				"binpack.weight":                    "10",
-				"binpack.cpu":                       "2",
-				"binpack.memory":                    "3",
+				"binpack.weight":                    10,
+				"binpack.cpu":                       2,
+				"binpack.memory":                    3,
 				"binpack.resources":                 "nvidia.com/gpu, example.com/foo",
-				"binpack.resources.nvidia.com/gpu":  "7",
-				"binpack.resources.example.com/foo": "8",
+				"binpack.resources.nvidia.com/gpu":  7,
+				"binpack.resources.example.com/foo": 8,
 			},
 			expected: map[string]map[string]float64{
 				"c1/p1": {
 					"n1": 700,
 					"n2": 137.5,
-					"n3": 150,
+					"n3": 0, // n3 has used 1.5c by pod p2, idle cpu not enough for p1
 				},
 				"c1/p2": {
 					"n1": 0,
@@ -180,36 +160,31 @@ func TestNode(t *testing.T) {
 				"c1/p4": {
 					"n1": 0,
 					"n2": 173.076923076,
-					"n3": 346.153846153,
+					"n3": 0, // required 3c, but node only has 2c
 				},
 			},
 		},
 		{
-			name: "single job",
-			podGroups: []*schedulingv1.PodGroup{
-				pg1,
-			},
-			queues: []*schedulingv1.Queue{
-				queue1,
-			},
-			pods: []*v1.Pod{
-				p1, p2, p3, p4,
-			},
-			nodes: []*v1.Node{
-				n1, n2, n3,
+			TestCommonStruct: uthelper.TestCommonStruct{
+				Name:      "single job",
+				Plugins:   map[string]framework.PluginBuilder{PluginName: New},
+				PodGroups: []*schedulingv1.PodGroup{pg1},
+				Queues:    []*schedulingv1.Queue{queue1},
+				Pods:      []*v1.Pod{p1, p2, p3, p4},
+				Nodes:     []*v1.Node{n1, n2, n3},
 			},
 			arguments: framework.Arguments{
-				"binpack.weight":                   "1",
-				"binpack.cpu":                      "1",
-				"binpack.memory":                   "1",
+				"binpack.weight":                   1,
+				"binpack.cpu":                      1,
+				"binpack.memory":                   1,
 				"binpack.resources":                "nvidia.com/gpu",
-				"binpack.resources.nvidia.com/gpu": "23",
+				"binpack.resources.nvidia.com/gpu": 23,
 			},
 			expected: map[string]map[string]float64{
 				"c1/p1": {
 					"n1": 75,
 					"n2": 15.625,
-					"n3": 12.5,
+					"n3": 0,
 				},
 				"c1/p2": {
 					"n1": 0,
@@ -224,42 +199,15 @@ func TestNode(t *testing.T) {
 				"c1/p4": {
 					"n1": 0,
 					"n2": 50,
-					"n3": 50,
+					"n3": 0,
 				},
 			},
 		},
 	}
 
+	trueValue := true
 	for i, test := range tests {
-		binder := &util.FakeBinder{
-			Binds:   map[string]string{},
-			Channel: make(chan string),
-		}
-		schedulerCache := &cache.SchedulerCache{
-			Nodes:         make(map[string]*api.NodeInfo),
-			Jobs:          make(map[api.JobID]*api.JobInfo),
-			Queues:        make(map[api.QueueID]*api.QueueInfo),
-			Binder:        binder,
-			StatusUpdater: &util.FakeStatusUpdater{},
-			VolumeBinder:  &util.FakeVolumeBinder{},
-
-			Recorder: record.NewFakeRecorder(100),
-		}
-		for _, node := range test.nodes {
-			schedulerCache.AddNode(node)
-		}
-		for _, pod := range test.pods {
-			schedulerCache.AddPod(pod)
-		}
-		for _, ss := range test.podGroups {
-			schedulerCache.AddPodGroupV1beta1(ss)
-		}
-		for _, q := range test.queues {
-			schedulerCache.AddQueueV1beta1(q)
-		}
-
-		trueValue := true
-		ssn := framework.OpenSession(schedulerCache, []conf.Tier{
+		tiers := []conf.Tier{
 			{
 				Plugins: []conf.PluginOption{
 					{
@@ -269,9 +217,8 @@ func TestNode(t *testing.T) {
 					},
 				},
 			},
-		}, nil)
-		defer framework.CloseSession(ssn)
-
+		}
+		ssn := test.RegisterSession(tiers, nil)
 		for _, job := range ssn.Jobs {
 			for _, task := range job.Tasks {
 				taskID := fmt.Sprintf("%s/%s", task.Namespace, task.Name)

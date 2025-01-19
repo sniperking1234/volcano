@@ -19,7 +19,12 @@ package router
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
+
+	"k8s.io/klog/v2"
+
+	"volcano.sh/volcano/cmd/webhook-manager/app/options"
 )
 
 type AdmissionHandler func(w http.ResponseWriter, r *http.Request)
@@ -45,8 +50,17 @@ func RegisterAdmission(service *AdmissionService) error {
 	return nil
 }
 
-func ForEachAdmission(handler func(*AdmissionService)) {
-	for _, f := range admissionMap {
-		handler(f)
+func ForEachAdmission(config *options.Config, handler func(*AdmissionService) error) error {
+	admissions := strings.Split(strings.TrimSpace(config.EnabledAdmission), ",")
+	klog.V(3).Infof("Enabled admissions are: %v, registered map are: %v", admissions, admissionMap)
+	for _, admission := range admissions {
+		if service, found := admissionMap[admission]; found {
+			if err := handler(service); err != nil {
+				return err
+			}
+		} else {
+			return fmt.Errorf("enabled admission %s not found on the admission registered map", admission)
+		}
 	}
+	return nil
 }

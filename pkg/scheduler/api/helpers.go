@@ -60,10 +60,30 @@ func getTaskStatus(pod *v1.Pod) TaskStatus {
 	return Unknown
 }
 
+// PreemptableStatus checks whether the task can be preempted
+func PreemptableStatus(status TaskStatus) bool {
+	switch status {
+	case Bound, Running:
+		return true
+	default:
+		return false
+	}
+}
+
 // AllocatedStatus checks whether the tasks has AllocatedStatus
 func AllocatedStatus(status TaskStatus) bool {
 	switch status {
 	case Bound, Binding, Running, Allocated:
+		return true
+	default:
+		return false
+	}
+}
+
+// CompletedStatus checks whether the tasks are completed (regardless of failure or success)
+func CompletedStatus(status TaskStatus) bool {
+	switch status {
+	case Failed, Succeeded:
 		return true
 	default:
 		return false

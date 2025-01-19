@@ -4,6 +4,10 @@ approvers:
   - Thor-wl
   - shinytang6
   - zen-xu
+  - qiankunli
+  - lowang-bh
+  - Monokaix
+  - hwdef
 reviewers:
   - k82cn
   - animeshsingh
@@ -14,3 +18,5 @@ reviewers:
   - zen-xu
   - shinytang6
   - merryzhou
+  - lowang-bh
+  - hwdef

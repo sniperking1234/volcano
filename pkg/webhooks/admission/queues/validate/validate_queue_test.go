@@ -20,16 +20,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"reflect"
 	"testing"
 
-	"k8s.io/api/admission/v1beta1"
+	admissionv1 "k8s.io/api/admission/v1"
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 
 	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 	fakeclient "volcano.sh/apis/pkg/client/clientset/versioned/fake"
+	informers "volcano.sh/apis/pkg/client/informers/externalversions"
 	"volcano.sh/volcano/pkg/webhooks/util"
 )
 
@@ -271,7 +274,36 @@ func TestAdmitQueues(t *testing.T) {
 		t.Errorf("Marshal hierarchicalQueueInSubPathOfAnotherQueue failed for %v.", err)
 	}
 
+	hierarchicalQueueWithNameThatIsSubstringOfOtherQueue := schedulingv1beta1.Queue{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "hierarchical-queue-with-name-that-is-substring-of-other-queue",
+			Annotations: map[string]string{
+				schedulingv1beta1.KubeHierarchyAnnotationKey:       "root/node",
+				schedulingv1beta1.KubeHierarchyWeightAnnotationKey: "1/4",
+			},
+		},
+		Spec: schedulingv1beta1.QueueSpec{
+			Weight: 1,
+		},
+	}
+	hierarchicalQueueWithNameThatIsSubstringOfOtherQueueJSON, err := json.Marshal(hierarchicalQueueWithNameThatIsSubstringOfOtherQueue)
+	if err != nil {
+		t.Errorf("Marshal  hierarchicalQueueWithNameThatIsSubstringOfOtherQueue failed for %v.", err)
+	}
 	config.VolcanoClient = fakeclient.NewSimpleClientset()
+	informerFactory := informers.NewSharedInformerFactory(config.VolcanoClient, 0)
+	queueInformer := informerFactory.Scheduling().V1beta1().Queues()
+	config.QueueLister = queueInformer.Lister()
+
+	stopCh := make(chan struct{})
+
+	informerFactory.Start(stopCh)
+	for informerType, ok := range informerFactory.WaitForCacheSync(stopCh) {
+		if !ok {
+			panic(fmt.Errorf("failed to sync cache: %v", informerType))
+		}
+	}
+
 	_, err = config.VolcanoClient.SchedulingV1beta1().Queues().Create(context.TODO(), &openStateForDelete, metav1.CreateOptions{})
 	if err != nil {
 		t.Errorf("Create queue with open state failed for %v.", err)
@@ -305,17 +337,17 @@ func TestAdmitQueues(t *testing.T) {
 
 	testCases := []struct {
 		Name           string
-		AR             v1beta1.AdmissionReview
-		reviewResponse *v1beta1.AdmissionResponse
+		AR             admissionv1.AdmissionReview
+		reviewResponse *admissionv1.AdmissionResponse
 	}{
 		{
 			Name: "Normal Case State Not Set During Creating",
-			AR: v1beta1.AdmissionReview{
+			AR: admissionv1.AdmissionReview{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "AdmissionReview",
 					APIVersion: "admission.k8s.io/v1beta1",
 				},
-				Request: &v1beta1.AdmissionRequest{
+				Request: &admissionv1.AdmissionRequest{
 					Kind: metav1.GroupVersionKind{
 						Group:   "scheduling.volcano.sh",
 						Version: "v1beta1",
@@ -333,18 +365,18 @@ func TestAdmitQueues(t *testing.T) {
 					},
 				},
 			},
-			reviewResponse: &v1beta1.AdmissionResponse{
+			reviewResponse: &admissionv1.AdmissionResponse{
 				Allowed: true,
 			},
 		},
 		{
 			Name: "Normal Case Set State of Open During Creating",
-			AR: v1beta1.AdmissionReview{
+			AR: admissionv1.AdmissionReview{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "AdmissionReview",
 					APIVersion: "admission.k8s.io/v1beta1",
 				},
-				Request: &v1beta1.AdmissionRequest{
+				Request: &admissionv1.AdmissionRequest{
 					Kind: metav1.GroupVersionKind{
 						Group:   "scheduling.volcano.sh",
 						Version: "v1beta1",
@@ -362,18 +394,18 @@ func TestAdmitQueues(t *testing.T) {
 					},
 				},
 			},
-			reviewResponse: &v1beta1.AdmissionResponse{
+			reviewResponse: &admissionv1.AdmissionResponse{
 				Allowed: true,
 			},
 		},
 		{
 			Name: "Normal Case Set State of Closed During Creating",
-			AR: v1beta1.AdmissionReview{
+			AR: admissionv1.AdmissionReview{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "AdmissionReview",
 					APIVersion: "admission.k8s.io/v1beta1",
 				},
-				Request: &v1beta1.AdmissionRequest{
+				Request: &admissionv1.AdmissionRequest{
 					Kind: metav1.GroupVersionKind{
 						Group:   "scheduling.volcano.sh",
 						Version: "v1beta1",
@@ -391,18 +423,18 @@ func TestAdmitQueues(t *testing.T) {
 					},
 				},
 			},
-			reviewResponse: &v1beta1.AdmissionResponse{
+			reviewResponse: &admissionv1.AdmissionResponse{
 				Allowed: true,
 			},
 		},
 		{
 			Name: "Abnormal Case Wrong State Configured During Creating",
-			AR: v1beta1.AdmissionReview{
+			AR: admissionv1.AdmissionReview{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "AdmissionReview",
 					APIVersion: "admission.k8s.io/v1beta1",
 				},
-				Request: &v1beta1.AdmissionRequest{
+				Request: &admissionv1.AdmissionRequest{
 					Kind: metav1.GroupVersionKind{
 						Group:   "scheduling.volcano.sh",
 						Version: "v1beta1",
@@ -420,7 +452,7 @@ func TestAdmitQueues(t *testing.T) {
 					},
 				},
 			},
-			reviewResponse: &v1beta1.AdmissionResponse{
+			reviewResponse: &admissionv1.AdmissionResponse{
 				Allowed: false,
 				Result: &metav1.Status{
 					Message: field.Invalid(field.NewPath("requestBody").Child("spec").Child("state"),
@@ -433,12 +465,12 @@ func TestAdmitQueues(t *testing.T) {
 		},
 		{
 			Name: "Normal Case Changing State From Open to Closed During Updating",
-			AR: v1beta1.AdmissionReview{
+			AR: admissionv1.AdmissionReview{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "AdmissionReview",
 					APIVersion: "admission.k8s.io/v1beta1",
 				},
-				Request: &v1beta1.AdmissionRequest{
+				Request: &admissionv1.AdmissionRequest{
 					Kind: metav1.GroupVersionKind{
 						Group:   "scheduling.volcano.sh",
 						Version: "v1beta1",
@@ -459,18 +491,18 @@ func TestAdmitQueues(t *testing.T) {
 					},
 				},
 			},
-			reviewResponse: &v1beta1.AdmissionResponse{
+			reviewResponse: &admissionv1.AdmissionResponse{
 				Allowed: true,
 			},
 		},
 		{
 			Name: "Normal Case Changing State From Closed to Open During Updating",
-			AR: v1beta1.AdmissionReview{
+			AR: admissionv1.AdmissionReview{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "AdmissionReview",
 					APIVersion: "admission.k8s.io/v1beta1",
 				},
-				Request: &v1beta1.AdmissionRequest{
+				Request: &admissionv1.AdmissionRequest{
 					Kind: metav1.GroupVersionKind{
 						Group:   "scheduling.volcano.sh",
 						Version: "v1beta1",
@@ -491,18 +523,18 @@ func TestAdmitQueues(t *testing.T) {
 					},
 				},
 			},
-			reviewResponse: &v1beta1.AdmissionResponse{
+			reviewResponse: &admissionv1.AdmissionResponse{
 				Allowed: true,
 			},
 		},
 		{
 			Name: "Abnormal Case Changing State From Open to Wrong State During Updating",
-			AR: v1beta1.AdmissionReview{
+			AR: admissionv1.AdmissionReview{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "AdmissionReview",
 					APIVersion: "admission.k8s.io/v1beta1",
 				},
-				Request: &v1beta1.AdmissionRequest{
+				Request: &admissionv1.AdmissionRequest{
 					Kind: metav1.GroupVersionKind{
 						Group:   "scheduling.volcano.sh",
 						Version: "v1beta1",
@@ -523,7 +555,7 @@ func TestAdmitQueues(t *testing.T) {
 					},
 				},
 			},
-			reviewResponse: &v1beta1.AdmissionResponse{
+			reviewResponse: &admissionv1.AdmissionResponse{
 				Allowed: false,
 				Result: &metav1.Status{
 					Message: field.Invalid(field.NewPath("requestBody").Child("spec").Child("state"),
@@ -536,12 +568,12 @@ func TestAdmitQueues(t *testing.T) {
 		},
 		{
 			Name: "Normal Case Queue With Closed State Can Be Deleted",
-			AR: v1beta1.AdmissionReview{
+			AR: admissionv1.AdmissionReview{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "AdmissionReview",
 					APIVersion: "admission.k8s.io/v1beta1",
 				},
-				Request: &v1beta1.AdmissionRequest{
+				Request: &admissionv1.AdmissionRequest{
 					Kind: metav1.GroupVersionKind{
 						Group:   "scheduling.volcano.sh",
 						Version: "v1beta1",
@@ -559,18 +591,18 @@ func TestAdmitQueues(t *testing.T) {
 					},
 				},
 			},
-			reviewResponse: &v1beta1.AdmissionResponse{
+			reviewResponse: &admissionv1.AdmissionResponse{
 				Allowed: true,
 			},
 		},
 		{
-			Name: "Abnormal Case Queue With Open State Can Not Be Deleted",
-			AR: v1beta1.AdmissionReview{
+			Name: "Normal Case Queue With Open State Can Be Deleted (Until close queue in kubectl supported)",
+			AR: admissionv1.AdmissionReview{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "AdmissionReview",
 					APIVersion: "admission.k8s.io/v1beta1",
 				},
-				Request: &v1beta1.AdmissionRequest{
+				Request: &admissionv1.AdmissionRequest{
 					Kind: metav1.GroupVersionKind{
 						Group:   "scheduling.volcano.sh",
 						Version: "v1beta1",
@@ -588,22 +620,47 @@ func TestAdmitQueues(t *testing.T) {
 					},
 				},
 			},
-			reviewResponse: &v1beta1.AdmissionResponse{
-				Allowed: false,
-				Result: &metav1.Status{
-					Message: fmt.Sprintf("only queue with state `%s` can be deleted, queue `%s` state is `%s`",
-						schedulingv1beta1.QueueStateClosed, "open-state-for-delete", schedulingv1beta1.QueueStateOpen),
-				},
+			reviewResponse: &admissionv1.AdmissionResponse{
+				Allowed: true,
 			},
 		},
 		{
-			Name: "Abnormal Case default Queue Can Not Be Deleted",
-			AR: v1beta1.AdmissionReview{
+			Name: "Normal Case Hierarchy Is A Substring of Another Queue",
+			AR: admissionv1.AdmissionReview{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "AdmissionReview",
 					APIVersion: "admission.k8s.io/v1beta1",
 				},
-				Request: &v1beta1.AdmissionRequest{
+				Request: &admissionv1.AdmissionRequest{
+					Kind: metav1.GroupVersionKind{
+						Group:   "scheduling.volcano.sh",
+						Version: "v1beta1",
+						Kind:    "Queue",
+					},
+					Resource: metav1.GroupVersionResource{
+						Group:    "scheduling.volcano.sh",
+						Version:  "v1beta1",
+						Resource: "queues",
+					},
+					Name:      "default",
+					Operation: "CREATE",
+					Object: runtime.RawExtension{
+						Raw: hierarchicalQueueWithNameThatIsSubstringOfOtherQueueJSON,
+					},
+				},
+			},
+			reviewResponse: &admissionv1.AdmissionResponse{
+				Allowed: true,
+			},
+		},
+		{
+			Name: "Abnormal Case default Queue Can Not Be Deleted",
+			AR: admissionv1.AdmissionReview{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "AdmissionReview",
+					APIVersion: "admission.k8s.io/v1beta1",
+				},
+				Request: &admissionv1.AdmissionRequest{
 					Kind: metav1.GroupVersionKind{
 						Group:   "scheduling.volcano.sh",
 						Version: "v1beta1",
@@ -621,7 +678,7 @@ func TestAdmitQueues(t *testing.T) {
 					},
 				},
 			},
-			reviewResponse: &v1beta1.AdmissionResponse{
+			reviewResponse: &admissionv1.AdmissionResponse{
 				Allowed: false,
 				Result: &metav1.Status{
 					Message: fmt.Sprintf("`%s` queue can not be deleted", "default"),
@@ -630,12 +687,12 @@ func TestAdmitQueues(t *testing.T) {
 		},
 		{
 			Name: "Invalid Action",
-			AR: v1beta1.AdmissionReview{
+			AR: admissionv1.AdmissionReview{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "AdmissionReview",
 					APIVersion: "admission.k8s.io/v1beta1",
 				},
-				Request: &v1beta1.AdmissionRequest{
+				Request: &admissionv1.AdmissionRequest{
 					Kind: metav1.GroupVersionKind{
 						Group:   "scheduling.volcano.sh",
 						Version: "v1beta1",
@@ -658,12 +715,12 @@ func TestAdmitQueues(t *testing.T) {
 		},
 		{
 			Name: "Create queue without weight",
-			AR: v1beta1.AdmissionReview{
+			AR: admissionv1.AdmissionReview{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "AdmissionReview",
 					APIVersion: "admission.k8s.io/v1beta1",
 				},
-				Request: &v1beta1.AdmissionRequest{
+				Request: &admissionv1.AdmissionRequest{
 					Kind: metav1.GroupVersionKind{
 						Group:   "scheduling.volcano.sh",
 						Version: "v1beta1",
@@ -681,7 +738,7 @@ func TestAdmitQueues(t *testing.T) {
 					},
 				},
 			},
-			reviewResponse: &v1beta1.AdmissionResponse{
+			reviewResponse: &admissionv1.AdmissionResponse{
 				Allowed: false,
 				Result: &metav1.Status{
 					Message: field.Invalid(field.NewPath("requestBody").Child("spec").Child("weight"),
@@ -691,12 +748,12 @@ func TestAdmitQueues(t *testing.T) {
 		},
 		{
 			Name: "Create queue with negative weight",
-			AR: v1beta1.AdmissionReview{
+			AR: admissionv1.AdmissionReview{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "AdmissionReview",
 					APIVersion: "admission.k8s.io/v1beta1",
 				},
-				Request: &v1beta1.AdmissionRequest{
+				Request: &admissionv1.AdmissionRequest{
 					Kind: metav1.GroupVersionKind{
 						Group:   "scheduling.volcano.sh",
 						Version: "v1beta1",
@@ -714,7 +771,7 @@ func TestAdmitQueues(t *testing.T) {
 					},
 				},
 			},
-			reviewResponse: &v1beta1.AdmissionResponse{
+			reviewResponse: &admissionv1.AdmissionResponse{
 				Allowed: false,
 				Result: &metav1.Status{
 					Message: field.Invalid(field.NewPath("requestBody").Child("spec").Child("weight"),
@@ -724,12 +781,12 @@ func TestAdmitQueues(t *testing.T) {
 		},
 		{
 			Name: "Update queue with negative weight",
-			AR: v1beta1.AdmissionReview{
+			AR: admissionv1.AdmissionReview{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "AdmissionReview",
 					APIVersion: "admission.k8s.io/v1beta1",
 				},
-				Request: &v1beta1.AdmissionRequest{
+				Request: &admissionv1.AdmissionRequest{
 					Kind: metav1.GroupVersionKind{
 						Group:   "scheduling.volcano.sh",
 						Version: "v1beta1",
@@ -750,7 +807,7 @@ func TestAdmitQueues(t *testing.T) {
 					},
 				},
 			},
-			reviewResponse: &v1beta1.AdmissionResponse{
+			reviewResponse: &admissionv1.AdmissionResponse{
 				Allowed: false,
 				Result: &metav1.Status{
 					Message: field.Invalid(field.NewPath("requestBody").Child("spec").Child("weight"),
@@ -761,12 +818,12 @@ func TestAdmitQueues(t *testing.T) {
 
 		{
 			Name: "Abnormal Case Hierarchy And Weights Do Not Match",
-			AR: v1beta1.AdmissionReview{
+			AR: admissionv1.AdmissionReview{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "AdmissionReview",
 					APIVersion: "admission.k8s.io/v1beta1",
 				},
-				Request: &v1beta1.AdmissionRequest{
+				Request: &admissionv1.AdmissionRequest{
 					Kind: metav1.GroupVersionKind{
 						Group:   "scheduling.volcano.sh",
 						Version: "v1beta1",
@@ -784,7 +841,7 @@ func TestAdmitQueues(t *testing.T) {
 					},
 				},
 			},
-			reviewResponse: &v1beta1.AdmissionResponse{
+			reviewResponse: &admissionv1.AdmissionResponse{
 				Allowed: false,
 				Result: &metav1.Status{
 					Message: field.Invalid(field.NewPath("requestBody").Child("metadata").Child("annotations"),
@@ -797,12 +854,12 @@ func TestAdmitQueues(t *testing.T) {
 		},
 		{
 			Name: "Abnormal Case Weights Is Negative",
-			AR: v1beta1.AdmissionReview{
+			AR: admissionv1.AdmissionReview{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "AdmissionReview",
 					APIVersion: "admission.k8s.io/v1beta1",
 				},
-				Request: &v1beta1.AdmissionRequest{
+				Request: &admissionv1.AdmissionRequest{
 					Kind: metav1.GroupVersionKind{
 						Group:   "scheduling.volcano.sh",
 						Version: "v1beta1",
@@ -820,7 +877,7 @@ func TestAdmitQueues(t *testing.T) {
 					},
 				},
 			},
-			reviewResponse: &v1beta1.AdmissionResponse{
+			reviewResponse: &admissionv1.AdmissionResponse{
 				Allowed: false,
 				Result: &metav1.Status{
 					Message: field.Invalid(field.NewPath("requestBody").Child("metadata").Child("annotations"),
@@ -833,12 +890,12 @@ func TestAdmitQueues(t *testing.T) {
 		},
 		{
 			Name: "Abnormal Case Weights Is Format Illegal",
-			AR: v1beta1.AdmissionReview{
+			AR: admissionv1.AdmissionReview{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "AdmissionReview",
 					APIVersion: "admission.k8s.io/v1beta1",
 				},
-				Request: &v1beta1.AdmissionRequest{
+				Request: &admissionv1.AdmissionRequest{
 					Kind: metav1.GroupVersionKind{
 						Group:   "scheduling.volcano.sh",
 						Version: "v1beta1",
@@ -856,7 +913,7 @@ func TestAdmitQueues(t *testing.T) {
 					},
 				},
 			},
-			reviewResponse: &v1beta1.AdmissionResponse{
+			reviewResponse: &admissionv1.AdmissionResponse{
 				Allowed: false,
 				Result: &metav1.Status{
 					Message: field.Invalid(field.NewPath("requestBody").Child("metadata").Child("annotations"),
@@ -869,12 +926,12 @@ func TestAdmitQueues(t *testing.T) {
 		},
 		{
 			Name: "Abnormal Case Hierarchy Is In Sub Path of Another Queue",
-			AR: v1beta1.AdmissionReview{
+			AR: admissionv1.AdmissionReview{
 				TypeMeta: metav1.TypeMeta{
 					Kind:       "AdmissionReview",
 					APIVersion: "admission.k8s.io/v1beta1",
 				},
-				Request: &v1beta1.AdmissionRequest{
+				Request: &admissionv1.AdmissionRequest{
 					Kind: metav1.GroupVersionKind{
 						Group:   "scheduling.volcano.sh",
 						Version: "v1beta1",
@@ -892,7 +949,7 @@ func TestAdmitQueues(t *testing.T) {
 					},
 				},
 			},
-			reviewResponse: &v1beta1.AdmissionResponse{
+			reviewResponse: &admissionv1.AdmissionResponse{
 				Allowed: false,
 				Result: &metav1.Status{
 					Message: field.Invalid(field.NewPath("requestBody").Child("metadata").Child("annotations"),
@@ -908,10 +965,284 @@ func TestAdmitQueues(t *testing.T) {
 	for _, testCase := range testCases {
 		t.Run(testCase.Name, func(t *testing.T) {
 			reviewResponse := AdmitQueues(testCase.AR)
-			if !reflect.DeepEqual(reviewResponse, testCase.reviewResponse) {
+			if !equality.Semantic.DeepEqual(reviewResponse, testCase.reviewResponse) {
 				t.Errorf("Test case %s failed, expect %v, got %v", testCase.Name,
 					testCase.reviewResponse, reviewResponse)
 			}
 		})
 	}
+	close(stopCh)
+}
+
+func TestAdmitHierarchicalQueues(t *testing.T) {
+	parentQueueWithJobs := schedulingv1beta1.Queue{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "parent-queue-with-jobs",
+		},
+		Spec: schedulingv1beta1.QueueSpec{
+			Parent: "queue-with-jobs",
+			Weight: 1,
+		},
+	}
+
+	parentQueueWithJobsJSON, err := json.Marshal(parentQueueWithJobs)
+	if err != nil {
+		t.Errorf("Marshal queue with parent queue failed for %v.", err)
+	}
+
+	parentQueueWithoutJobs := schedulingv1beta1.Queue{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "parent-queue-without-jobs",
+		},
+		Spec: schedulingv1beta1.QueueSpec{
+			Parent: "queue-without-jobs",
+			Weight: 1,
+		},
+	}
+
+	parentQueueWithoutJobsJSON, err := json.Marshal(parentQueueWithoutJobs)
+	if err != nil {
+		t.Errorf("Marshal queue with parent queue failed for %v.", err)
+	}
+
+	queueWithChild := schedulingv1beta1.Queue{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "queue-with-child-queues",
+		},
+		Spec: schedulingv1beta1.QueueSpec{
+			Parent: "root",
+		},
+	}
+	queueWithChildJSON, err := json.Marshal(queueWithChild)
+	if err != nil {
+		t.Errorf("Marshal queue with child queue failed for %v.", err)
+	}
+
+	queueWithoutChild := schedulingv1beta1.Queue{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "queue-without-child-queues",
+		},
+		Spec: schedulingv1beta1.QueueSpec{
+			Parent: "root",
+		},
+	}
+	queueWithoutChildJSON, err := json.Marshal(queueWithoutChild)
+	if err != nil {
+		t.Errorf("Marshal queue with child queue failed for %v.", err)
+	}
+
+	config.VolcanoClient = fakeclient.NewSimpleClientset()
+	informerFactory := informers.NewSharedInformerFactory(config.VolcanoClient, 0)
+	queueInformer := informerFactory.Scheduling().V1beta1().Queues()
+	config.QueueLister = queueInformer.Lister()
+
+	stopCh := make(chan struct{})
+	informerFactory.Start(stopCh)
+	for informerType, ok := range informerFactory.WaitForCacheSync(stopCh) {
+		if !ok {
+			panic(fmt.Errorf("failed to sync cache: %v", informerType))
+		}
+	}
+
+	queueWithJobs := schedulingv1beta1.Queue{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "queue-with-jobs",
+		},
+		Spec: schedulingv1beta1.QueueSpec{
+			Parent: "root",
+		},
+		Status: schedulingv1beta1.QueueStatus{
+			Allocated: v1.ResourceList{
+				v1.ResourcePods: resource.MustParse("1"),
+			},
+		},
+	}
+
+	queueWithoutJobs := schedulingv1beta1.Queue{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "queue-without-jobs",
+		},
+		Spec: schedulingv1beta1.QueueSpec{
+			Parent: "root",
+		},
+		Status: schedulingv1beta1.QueueStatus{
+			Allocated: v1.ResourceList{
+				v1.ResourcePods: resource.MustParse("0"),
+			},
+		},
+	}
+
+	childQueue := schedulingv1beta1.Queue{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "child-queue",
+		},
+		Spec: schedulingv1beta1.QueueSpec{
+			Parent: "queue-with-child-queues",
+		},
+	}
+
+	_, err = config.VolcanoClient.SchedulingV1beta1().Queues().Create(context.TODO(), &queueWithJobs, metav1.CreateOptions{})
+	if err != nil {
+		t.Errorf("Create queue with jobs failed for %v.", err)
+	}
+
+	_, err = config.VolcanoClient.SchedulingV1beta1().Queues().Create(context.TODO(), &queueWithoutJobs, metav1.CreateOptions{})
+	if err != nil {
+		t.Errorf("Create queue without jobs failed for %v.", err)
+	}
+
+	_, err = config.VolcanoClient.SchedulingV1beta1().Queues().Create(context.TODO(), &childQueue, metav1.CreateOptions{})
+	if err != nil {
+		t.Errorf("Create child queue failed for %v.", err)
+	}
+
+	_, err = config.VolcanoClient.SchedulingV1beta1().Queues().Create(context.TODO(), &queueWithChild, metav1.CreateOptions{})
+	if err != nil {
+		t.Errorf("Create queue failed for %v.", err)
+	}
+
+	_, err = config.VolcanoClient.SchedulingV1beta1().Queues().Create(context.TODO(), &queueWithoutChild, metav1.CreateOptions{})
+	if err != nil {
+		t.Errorf("Create queue failed for %v.", err)
+	}
+
+	testCases := []struct {
+		Name           string
+		AR             admissionv1.AdmissionReview
+		reviewResponse *admissionv1.AdmissionResponse
+	}{
+		{
+			Name: "Parent Queue has jobs",
+			AR: admissionv1.AdmissionReview{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "AdmissionReview",
+					APIVersion: "admission.k8s.io/v1beta1",
+				},
+				Request: &admissionv1.AdmissionRequest{
+					Kind: metav1.GroupVersionKind{
+						Group:   "scheduling.volcano.sh",
+						Version: "v1beta1",
+						Kind:    "Queue",
+					},
+					Resource: metav1.GroupVersionResource{
+						Group:    "scheduling.volcano.sh",
+						Version:  "v1beta1",
+						Resource: "queues",
+					},
+					Name:      "parent-queue-with-jobs",
+					Operation: "CREATE",
+					Object: runtime.RawExtension{
+						Raw: parentQueueWithJobsJSON,
+					},
+				},
+			},
+			reviewResponse: &admissionv1.AdmissionResponse{
+				Allowed: false,
+				Result: &metav1.Status{
+					Message: "queue queue-with-jobs cannot be the parent queue of queue parent-queue-with-jobs because it has allocated Pods: 1",
+				},
+			},
+		},
+		{
+			Name: "Parent Queue has no jobs",
+			AR: admissionv1.AdmissionReview{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "AdmissionReview",
+					APIVersion: "admission.k8s.io/v1beta1",
+				},
+				Request: &admissionv1.AdmissionRequest{
+					Kind: metav1.GroupVersionKind{
+						Group:   "scheduling.volcano.sh",
+						Version: "v1beta1",
+						Kind:    "Queue",
+					},
+					Resource: metav1.GroupVersionResource{
+						Group:    "scheduling.volcano.sh",
+						Version:  "v1beta1",
+						Resource: "queues",
+					},
+					Name:      "parent-queue-without-jobs",
+					Operation: "CREATE",
+					Object: runtime.RawExtension{
+						Raw: parentQueueWithoutJobsJSON,
+					},
+				},
+			},
+			reviewResponse: &admissionv1.AdmissionResponse{
+				Allowed: true,
+			},
+		},
+		{
+			Name: "Delete queue with child queue",
+			AR: admissionv1.AdmissionReview{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "AdmissionReview",
+					APIVersion: "admission.k8s.io/v1beta1",
+				},
+				Request: &admissionv1.AdmissionRequest{
+					Kind: metav1.GroupVersionKind{
+						Group:   "scheduling.volcano.sh",
+						Version: "v1beta1",
+						Kind:    "Queue",
+					},
+					Resource: metav1.GroupVersionResource{
+						Group:    "scheduling.volcano.sh",
+						Version:  "v1beta1",
+						Resource: "queues",
+					},
+					Name:      "queue-with-child-queues",
+					Operation: "DELETE",
+					Object: runtime.RawExtension{
+						Raw: queueWithChildJSON,
+					},
+				},
+			},
+			reviewResponse: &admissionv1.AdmissionResponse{
+				Allowed: false,
+				Result: &metav1.Status{
+					Message: "queue queue-with-child-queues can not be deleted because it has 1 child queues: child-queue",
+				},
+			},
+		},
+		{
+			Name: "Delete queue without child queue",
+			AR: admissionv1.AdmissionReview{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "AdmissionReview",
+					APIVersion: "admission.k8s.io/v1beta1",
+				},
+				Request: &admissionv1.AdmissionRequest{
+					Kind: metav1.GroupVersionKind{
+						Group:   "scheduling.volcano.sh",
+						Version: "v1beta1",
+						Kind:    "Queue",
+					},
+					Resource: metav1.GroupVersionResource{
+						Group:    "scheduling.volcano.sh",
+						Version:  "v1beta1",
+						Resource: "queues",
+					},
+					Name:      "queue-without-child-queues",
+					Operation: "DELETE",
+					Object: runtime.RawExtension{
+						Raw: queueWithoutChildJSON,
+					},
+				},
+			},
+			reviewResponse: &admissionv1.AdmissionResponse{
+				Allowed: true,
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.Name, func(t *testing.T) {
+			reviewResponse := AdmitQueues(testCase.AR)
+			if !equality.Semantic.DeepEqual(reviewResponse, testCase.reviewResponse) {
+				t.Errorf("Test case %s failed, expect %v, got %v", testCase.Name,
+					testCase.reviewResponse, reviewResponse)
+			}
+		})
+	}
+	close(stopCh)
 }

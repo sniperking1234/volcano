@@ -18,7 +18,11 @@ package util
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,7 +73,7 @@ func BuildConfig(master, kubeconfig string) (*rest.Config, error) {
 	return clientcmd.BuildConfigFromFlags(master, kubeconfig)
 }
 
-// PopulateResourceListV1 takes strings of form <resourceName1>=<value1>,<resourceName1>=<value2> and returns ResourceList.
+// PopulateResourceListV1 takes strings of form <resourceName1>=<value1>,<resourceName2>=<value2> and returns ResourceList.
 func PopulateResourceListV1(spec string) (v1.ResourceList, error) {
 	// empty input gets a nil response to preserve generator test expected behaviors
 	if spec == "" {
@@ -121,9 +125,9 @@ func CreateQueueCommand(vcClient *versioned.Clientset, ns, name string, action v
 }
 
 // CreateJobCommand executes a command such as resume/suspend.
-func CreateJobCommand(config *rest.Config, ns, name string, action vcbus.Action) error {
+func CreateJobCommand(ctx context.Context, config *rest.Config, ns, name string, action vcbus.Action) error {
 	jobClient := versioned.NewForConfigOrDie(config)
-	job, err := jobClient.BatchV1alpha1().Jobs(ns).Get(context.TODO(), name, metav1.GetOptions{})
+	job, err := jobClient.BatchV1alpha1().Jobs(ns).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
@@ -142,7 +146,7 @@ func CreateJobCommand(config *rest.Config, ns, name string, action vcbus.Action)
 		Action:       string(action),
 	}
 
-	if _, err := jobClient.BusV1alpha1().Commands(ns).Create(context.TODO(), cmd, metav1.CreateOptions{}); err != nil {
+	if _, err := jobClient.BusV1alpha1().Commands(ns).Create(ctx, cmd, metav1.CreateOptions{}); err != nil {
 		return err
 	}
 
@@ -199,4 +203,35 @@ func HumanDuration(d time.Duration) string {
 		return fmt.Sprintf("%dy%dd", hours/24/365, (hours/24)%365)
 	}
 	return fmt.Sprintf("%dy", hours/24/365)
+}
+
+// RedirectStdout redirects os.Stdout to a pipe and returns the read and write ends of the pipe.
+func RedirectStdout() (*os.File, *os.File) {
+	r, w, _ := os.Pipe()
+	oldStdout := os.Stdout
+	os.Stdout = w
+	return r, oldStdout
+}
+
+// CaptureOutput reads from r until EOF and returns the result as a string.
+func CaptureOutput(r *os.File, oldStdout *os.File) string {
+	w := os.Stdout
+	os.Stdout = oldStdout
+	w.Close()
+	gotOutput, _ := io.ReadAll(r)
+	return strings.TrimSpace(string(gotOutput))
+}
+
+// CreateTestServer creates an HTTP server that responds with the given response.
+func CreateTestServer(response interface{}) *httptest.Server {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		val, err := json.Marshal(response)
+		if err == nil {
+			w.Write(val)
+		}
+	})
+
+	server := httptest.NewServer(handler)
+	return server
 }

@@ -17,17 +17,16 @@ limitations under the License.
 package api
 
 import (
-	"fmt"
+	"encoding/json"
 	"strconv"
-	"strings"
-	"time"
 
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
+
 	"volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
 
-// Refer k8s.io/kubernetes/pkg/scheduler/algorithm/predicates/predicates.go#GetResourceRequest.
+// Refer k8s.io/kubernetes/pkg/api/v1/resource/helpers.go#PodRequests.
 //
 // GetResourceRequest returns a *Resource that covers the largest width in each resource dimension.
 // Because init-containers run sequentially, we collect the max in each dimension iteratively.
@@ -60,10 +59,29 @@ import (
 func GetPodResourceRequest(pod *v1.Pod) *Resource {
 	result := GetPodResourceWithoutInitContainers(pod)
 
-	// take max_resource(sum_pod, any_init_container)
+	restartableInitContainerReqs := EmptyResource()
+	initContainerReqs := EmptyResource()
 	for _, container := range pod.Spec.InitContainers {
-		result.SetMaxResource(NewResource(container.Resources.Requests))
+		containerReq := NewResource(container.Resources.Requests)
+
+		if container.RestartPolicy != nil && *container.RestartPolicy == v1.ContainerRestartPolicyAlways {
+			// Add the restartable container's req to the resulting cumulative container requests.
+			result.Add(containerReq)
+
+			// Track our cumulative restartable init container resources
+			restartableInitContainerReqs.Add(containerReq)
+			containerReq = restartableInitContainerReqs
+		} else {
+			tmp := EmptyResource()
+			tmp.Add(containerReq)
+			tmp.Add(restartableInitContainerReqs)
+			containerReq = tmp
+		}
+		initContainerReqs.SetMaxResource(containerReq)
 	}
+
+	result.SetMaxResource(initContainerReqs)
+	result.AddScalar(v1.ResourcePods, 1)
 
 	return result
 }
@@ -94,7 +112,7 @@ func GetPodPreemptable(pod *v1.Pod) bool {
 		}
 	}
 
-	return false
+	return true
 }
 
 // GetPodRevocableZone return volcano.sh/revocable-zone value for pod/podgroup
@@ -116,14 +134,27 @@ func GetPodRevocableZone(pod *v1.Pod) string {
 	return ""
 }
 
-// GetPodTopologyPolicy return volcano.sh/numa-topology-policy value for pod
-func GetPodTopologyPolicy(pod *v1.Pod) string {
+// GetPodTopologyInfo return volcano.sh/numa-topology-policy value for pod
+func GetPodTopologyInfo(pod *v1.Pod) *TopologyInfo {
+	info := TopologyInfo{
+		ResMap: make(map[int]v1.ResourceList),
+	}
+
 	if len(pod.Annotations) > 0 {
 		if value, found := pod.Annotations[v1beta1.NumaPolicyKey]; found {
-			return value
+			info.Policy = value
+		}
+
+		if value, found := pod.Annotations[topologyDecisionAnnotation]; found {
+			decision := PodResourceDecision{}
+			err := json.Unmarshal([]byte(value), &decision)
+			if err == nil {
+				info.ResMap = decision.NUMAResources
+			}
 		}
 	}
-	return ""
+
+	return &info
 }
 
 // GetPodResourceWithoutInitContainers returns Pod's resource request, it does not contain
@@ -134,43 +165,10 @@ func GetPodResourceWithoutInitContainers(pod *v1.Pod) *Resource {
 		result.Add(NewResource(container.Resources.Requests))
 	}
 
-	return result
-}
-
-// GetGPUIndex returns the ID of the GPU
-func GetGPUIndex(pod *v1.Pod) int {
-	if len(pod.Annotations) > 0 {
-		value, found := pod.Annotations[GPUIndex]
-		if found {
-			id, err := strconv.Atoi(value)
-			if err != nil {
-				klog.Errorf("invalid %s=%s", GPUIndex, value)
-				return -1
-			}
-			return id
-		}
+	// if PodOverhead feature is supported, add overhead for running a pod
+	if pod.Spec.Overhead != nil {
+		result.Add(NewResource(pod.Spec.Overhead))
 	}
 
-	return -1
-}
-
-func escapeJSONPointer(p string) string {
-	// Escaping reference name using https://tools.ietf.org/html/rfc6901
-	p = strings.Replace(p, "~", "~0", -1)
-	p = strings.Replace(p, "/", "~1", -1)
-	return p
-}
-
-// AddGPUIndexPatch returns the patch adding GPU index
-func AddGPUIndexPatch(id int) string {
-	return fmt.Sprintf(`[{"op": "add", "path": "/metadata/annotations/%s", "value":"%d"},`+
-		`{"op": "add", "path": "/metadata/annotations/%s", "value": "%d"}]`,
-		escapeJSONPointer(PredicateTime), time.Now().UnixNano(),
-		escapeJSONPointer(GPUIndex), id)
-}
-
-// RemoveGPUIndexPatch returns the patch removing GPU index
-func RemoveGPUIndexPatch() string {
-	return fmt.Sprintf(`[{"op": "remove", "path": "/metadata/annotations/%s"},`+
-		`{"op": "remove", "path": "/metadata/annotations/%s"]`, escapeJSONPointer(PredicateTime), escapeJSONPointer(GPUIndex))
+	return result
 }

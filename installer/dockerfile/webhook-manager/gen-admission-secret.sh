@@ -5,7 +5,7 @@ set -e
 usage() {
     cat <<EOF
 Generate certificate suitable for use with an admission controller service.
-This script uses k8s' CertificateSigningRequest API to a generate a
+This script uses k8s' CertificateSigningRequest API to generate a
 certificate signed by k8s CA suitable for use with webhook
 services. This requires permissions to create and approve CSR. See
 https://kubernetes.io/docs/tasks/tls/managing-tls-in-a-cluster for
@@ -83,11 +83,11 @@ EOF
   openssl req -x509 -new -nodes -key ${CERTDIR}/ca.key -subj "/CN=${SERVICE}.${NAMESPACE}.svc" -days 3650 -out ${CERTDIR}/ca.crt
 
   openssl genrsa -out ${CERTDIR}/server.key 2048
-  openssl req -new -key ${CERTDIR}/server.key -subj "/CN=${SERVICE}.${NAMESPACE}.svc" -days 3650 -out ${CERTDIR}/server.csr -config ${CERTDIR}/csr.conf
+  openssl req -new -key ${CERTDIR}/server.key -subj "/CN=${SERVICE}.${NAMESPACE}.svc"  -out ${CERTDIR}/server.csr -config ${CERTDIR}/csr.conf
 
   openssl x509 -req -in  ${CERTDIR}/server.csr -CA  ${CERTDIR}/ca.crt -CAkey  ${CERTDIR}/ca.key \
   -CAcreateserial -out  ${CERTDIR}/server.crt \
-  -extensions v3_req -extfile  ${CERTDIR}/csr.conf
+  -extensions v3_req -extfile  ${CERTDIR}/csr.conf -days 3650
 }
 
 function createSecret() {
@@ -99,6 +99,29 @@ function createSecret() {
       -n ${NAMESPACE}
 }
 
+function patchSecret() {
+  TLS_KEY=$(base64 < ${CERTDIR}/server.key | tr -d '\n')
+  TLS_CRT=$(base64 < ${CERTDIR}/server.crt | tr -d '\n')
+  CA_CRT=$(base64 < ${CERTDIR}/ca.crt | tr -d '\n')
+
+  cat <<EOF > ${CERTDIR}/patch.json
+[
+  {"op": "replace", "path": "/data/tls.key", "value": "$TLS_KEY"},
+  {"op": "replace", "path": "/data/tls.crt", "value": "$TLS_CRT"},
+  {"op": "replace", "path": "/data/ca.crt", "value": "$CA_CRT"},
+]
+EOF
+
+  kubectl patch secret ${SECRET} -n ${NAMESPACE} --type=json -p="$(cat ${CERTDIR}/patch.json)"
+}
+
 createCerts
 
-createSecret
+ret=0
+kubectl get secret ${SECRET} -n ${NAMESPACE} > /dev/null || ret=$?
+if [[ ${ret} -eq 0 ]];then
+  echo -e "The secret ${SECRET} -n ${NAMESPACE} already exists. Will update it."
+  patchSecret
+else
+  createSecret
+fi

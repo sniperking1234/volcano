@@ -27,10 +27,11 @@ type ClusterInfo struct {
 	Queues         map[QueueID]*QueueInfo
 	NamespaceInfo  map[NamespaceName]*NamespaceInfo
 	RevocableNodes map[string]*NodeInfo
+	NodeList       []string
+	CSINodesStatus map[string]*CSINodeStatusInfo
 }
 
 func (ci ClusterInfo) String() string {
-
 	str := "Cache:\n"
 
 	if len(ci.Nodes) != 0 {
@@ -64,9 +65,12 @@ func (ci ClusterInfo) String() string {
 	if len(ci.NamespaceInfo) != 0 {
 		str += "Namespaces:\n"
 		for _, ns := range ci.NamespaceInfo {
-			str += fmt.Sprintf("\t Namespace(%s) Weight(%v)\n",
-				ns.Name, ns.Weight)
+			str += fmt.Sprintf("\t Namespace(%s)\n", ns.Name)
 		}
+	}
+
+	if len(ci.NodeList) != 0 {
+		str += fmt.Sprintf("NodeList: %v\n", ci.NodeList)
 	}
 
 	return str

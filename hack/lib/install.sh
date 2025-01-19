@@ -18,35 +18,35 @@
 function kind-up-cluster {
   check-kind
 
-  echo "Running kind: [kind create cluster ${CLUSTER_CONTEXT} ${KIND_OPT}]"
-  kind create cluster ${CLUSTER_CONTEXT} ${KIND_OPT}
+  echo "Running kind: [kind create cluster ${CLUSTER_CONTEXT[*]} ${KIND_OPT}]"
+  kind create cluster "${CLUSTER_CONTEXT[@]}" ${KIND_OPT}
 
   echo
   check-images
 
   echo
   echo "Loading docker images into kind cluster"
-  kind load docker-image ${IMAGE_PREFIX}-controller-manager:${TAG} ${CLUSTER_CONTEXT}
-  kind load docker-image ${IMAGE_PREFIX}-scheduler:${TAG} ${CLUSTER_CONTEXT}
-  kind load docker-image ${IMAGE_PREFIX}-webhook-manager:${TAG} ${CLUSTER_CONTEXT}
+  kind load docker-image ${IMAGE_PREFIX}/vc-controller-manager:${TAG} "${CLUSTER_CONTEXT[@]}"
+  kind load docker-image ${IMAGE_PREFIX}/vc-scheduler:${TAG} "${CLUSTER_CONTEXT[@]}"
+  kind load docker-image ${IMAGE_PREFIX}/vc-webhook-manager:${TAG} "${CLUSTER_CONTEXT[@]}"
 }
 
 # check if the required images exist
 function check-images {
   echo "Checking whether the required images exist"
-  docker image inspect "${IMAGE_PREFIX}-controller-manager:${TAG}" > /dev/null
+  docker image inspect "${IMAGE_PREFIX}/vc-controller-manager:${TAG}" > /dev/null
   if [[ $? -ne 0 ]]; then
-    echo -e "\033[31mERROR\033[0m: ${IMAGE_PREFIX}-controller-manager:${TAG} does not exist"
+    echo -e "\033[31mERROR\033[0m: ${IMAGE_PREFIX}/vc-controller-manager:${TAG} does not exist"
     exit 1
   fi
-  docker image inspect "${IMAGE_PREFIX}-scheduler:${TAG}" > /dev/null
+  docker image inspect "${IMAGE_PREFIX}/vc-scheduler:${TAG}" > /dev/null
   if [[ $? -ne 0 ]]; then
-    echo -e "\033[31mERROR\033[0m: ${IMAGE_PREFIX}-scheduler:${TAG} does not exist"
+    echo -e "\033[31mERROR\033[0m: ${IMAGE_PREFIX}/vc-scheduler:${TAG} does not exist"
     exit 1
   fi
-  docker image inspect "${IMAGE_PREFIX}-webhook-manager:${TAG}" > /dev/null
+  docker image inspect "${IMAGE_PREFIX}/vc-webhook-manager:${TAG}" > /dev/null
   if [[ $? -ne 0 ]]; then
-    echo -e "\033[31mERROR\033[0m: ${IMAGE_PREFIX}-webhook-manager:${TAG} does not exist"
+    echo -e "\033[31mERROR\033[0m: ${IMAGE_PREFIX}/vc-webhook-manager:${TAG} does not exist"
     exit 1
   fi
 }
@@ -59,7 +59,7 @@ function check-prerequisites {
     echo -e "\033[31mERROR\033[0m: kubectl not installed"
     exit 1
   else
-    echo -n "Found kubectl, version: " && kubectl version --short --client
+    echo -n "Found kubectl, version: " && kubectl version --client
   fi
 }
 
@@ -69,7 +69,7 @@ function check-kind {
   which kind >/dev/null 2>&1
   if [[ $? -ne 0 ]]; then
     echo "Installing kind ..."
-    GO111MODULE="on" go get sigs.k8s.io/kind@v0.6.1
+    GOOS=${OS} go install sigs.k8s.io/kind@v0.24.0
   else
     echo -n "Found kind, version: " && kind version
   fi
@@ -82,10 +82,20 @@ function install-helm {
   if [[ $? -ne 0 ]]; then
     echo "Installing helm via script"
     HELM_TEMP_DIR=$(mktemp -d)
-    curl https://raw.githubusercontent.com/helm/helm/master/scripts/get > ${HELM_TEMP_DIR}/get_helm.sh
-    # TODO: There are some issue with helm's latest version, remove '--version' when it get fixed.
-    chmod 700 ${HELM_TEMP_DIR}/get_helm.sh && ${HELM_TEMP_DIR}/get_helm.sh --version v3.5.3
+    curl -fsSL -o ${HELM_TEMP_DIR}/get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+    chmod 700 ${HELM_TEMP_DIR}/get_helm.sh && ${HELM_TEMP_DIR}/get_helm.sh
   else
     echo -n "Found helm, version: " && helm version
+  fi
+}
+
+function install-ginkgo-if-not-exist {
+  echo "Checking ginkgo"
+  which ginkgo >/dev/null 2>&1
+  if [[ $? -ne 0 ]]; then
+    echo "Installing ginkgo ..."
+    GOOS=${OS} go install github.com/onsi/ginkgo/v2/ginkgo
+  else
+    echo -n "Found ginkgo, version: " && ginkgo version
   fi
 }

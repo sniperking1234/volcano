@@ -93,38 +93,6 @@ var (
 			Help:      "If one queue is overused",
 		}, []string{"queue_name"},
 	)
-
-	queuePodGroupInqueue = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Subsystem: VolcanoNamespace,
-			Name:      "queue_pod_group_inqueue_count",
-			Help:      "The number of Inqueue PodGroup in this queue",
-		}, []string{"queue_name"},
-	)
-
-	queuePodGroupPending = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Subsystem: VolcanoNamespace,
-			Name:      "queue_pod_group_pending_count",
-			Help:      "The number of Pending PodGroup in this queue",
-		}, []string{"queue_name"},
-	)
-
-	queuePodGroupRunning = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Subsystem: VolcanoNamespace,
-			Name:      "queue_pod_group_running_count",
-			Help:      "The number of Running PodGroup in this queue",
-		}, []string{"queue_name"},
-	)
-
-	queuePodGroupUnknown = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Subsystem: VolcanoNamespace,
-			Name:      "queue_pod_group_unknown_count",
-			Help:      "The number of Unknown PodGroup in this queue",
-		}, []string{"queue_name"},
-	)
 )
 
 // UpdateQueueAllocated records allocated resources for one queue
@@ -166,22 +134,15 @@ func UpdateQueueOverused(queueName string, overused bool) {
 	queueOverused.WithLabelValues(queueName).Set(value)
 }
 
-// UpdateQueuePodGroupInqueueCount records the number of Inqueue PodGroup in this queue
-func UpdateQueuePodGroupInqueueCount(queueName string, count int32) {
-	queuePodGroupInqueue.WithLabelValues(queueName).Set(float64(count))
-}
-
-// UpdateQueuePodGroupPendingCount records the number of Pending PodGroup in this queue
-func UpdateQueuePodGroupPendingCount(queueName string, count int32) {
-	queuePodGroupPending.WithLabelValues(queueName).Set(float64(count))
-}
-
-// UpdateQueuePodGroupRunningCount records the number of Running PodGroup in this queue
-func UpdateQueuePodGroupRunningCount(queueName string, count int32) {
-	queuePodGroupRunning.WithLabelValues(queueName).Set(float64(count))
-}
-
-// UpdateQueuePodGroupUnknownCount records the number of Unknown PodGroup in this queue
-func UpdateQueuePodGroupUnknownCount(queueName string, count int32) {
-	queuePodGroupUnknown.WithLabelValues(queueName).Set(float64(count))
+// DeleteQueueMetrics delete all metrics related to the queue
+func DeleteQueueMetrics(queueName string) {
+	queueAllocatedMilliCPU.DeleteLabelValues(queueName)
+	queueAllocatedMemory.DeleteLabelValues(queueName)
+	queueRequestMilliCPU.DeleteLabelValues(queueName)
+	queueRequestMemory.DeleteLabelValues(queueName)
+	queueDeservedMilliCPU.DeleteLabelValues(queueName)
+	queueDeservedMemory.DeleteLabelValues(queueName)
+	queueShare.DeleteLabelValues(queueName)
+	queueWeight.DeleteLabelValues(queueName)
+	queueOverused.DeleteLabelValues(queueName)
 }

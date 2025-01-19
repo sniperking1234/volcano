@@ -19,7 +19,7 @@ package sla
 import (
 	"time"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"volcano.sh/volcano/pkg/scheduler/api"
 	"volcano.sh/volcano/pkg/scheduler/framework"
@@ -30,7 +30,7 @@ const (
 	// PluginName indicates name of volcano scheduler plugin
 	PluginName = "sla"
 	// JobWaitingTime is maximum waiting time that a job could stay Pending in service level agreement
-	// when job waits longer than waiting time, it should be inqueue at once, and cluster should reserve resources for it
+	// when job waits longer than waiting time, it should be enqueue at once, and cluster should reserve resources for it
 	// Valid time units are “ns”, “us” (or “µs”), “ms”, “s”, “m”, “h”
 	JobWaitingTime = "sla-waiting-time"
 )
@@ -71,14 +71,15 @@ tiers:
 - plugins:
   - name: sla
     arguments:
-	  sla-waiting-time: 1h2m3s4ms5µs6ns
+    sla-waiting-time: 1h2m3s4ms5µs6ns
 
-Meanwhile, use can give individual job waiting time settings for one job via job annotations:
+Meanwhile, user can give individual job waiting time settings for one job via job annotations:
 apiVersion: batch.volcano.sh/v1alpha1
 kind: Job
 metadata:
-  annotations:
-    sla-waiting-time: 1h2m3s4ms5us6ns
+
+	annotations:
+	  sla-waiting-time: 1h2m3s4ms5us6ns
 */
 func (sp *slaPlugin) OnSessionOpen(ssn *framework.Session) {
 	klog.V(4).Infof("Enter sla plugin ...")
@@ -87,7 +88,11 @@ func (sp *slaPlugin) OnSessionOpen(ssn *framework.Session) {
 	// read in sla waiting time for global cluster from sla plugin arguments
 	// if not set, job waiting time still can set in job yaml separately, otherwise job have no sla limits
 	if _, exist := sp.pluginArguments[JobWaitingTime]; exist {
-		jwt, err := time.ParseDuration(sp.pluginArguments[JobWaitingTime])
+		waitTime, ok := sp.pluginArguments[JobWaitingTime].(string)
+		if !ok {
+			waitTime = ""
+		}
+		jwt, err := time.ParseDuration(waitTime)
 		if err != nil {
 			klog.Errorf("Error occurs in parsing global job waiting time in sla plugin, err: %s.", err.Error())
 		}

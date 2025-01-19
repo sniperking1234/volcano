@@ -17,6 +17,7 @@ limitations under the License.
 package job
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -26,7 +27,7 @@ import (
 	"github.com/spf13/cobra"
 
 	v1alpha1batch "volcano.sh/apis/pkg/apis/batch/v1alpha1"
-	v1alpha1 "volcano.sh/apis/pkg/apis/bus/v1alpha1"
+	"volcano.sh/apis/pkg/apis/bus/v1alpha1"
 )
 
 func TestResumeJob(t *testing.T) {
@@ -69,7 +70,7 @@ func TestResumeJob(t *testing.T) {
 	}
 
 	for i, testcase := range testCases {
-		err := ResumeJob()
+		err := ResumeJob(context.TODO())
 		if err != nil {
 			t.Errorf("case %d (%s): expected: %v, got %v ", i, testcase.Name, testcase.ExpectValue, err)
 		}

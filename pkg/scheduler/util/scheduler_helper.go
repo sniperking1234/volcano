@@ -23,11 +23,12 @@ import (
 	"math/rand"
 	"sort"
 	"sync"
-	"sync/atomic"
 
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/klog"
-	k8sframework "k8s.io/kubernetes/pkg/scheduler/framework/v1alpha1"
+	"k8s.io/klog/v2"
+	k8sframework "k8s.io/kubernetes/pkg/scheduler/framework"
 
 	"volcano.sh/volcano/cmd/scheduler/app/options"
 	"volcano.sh/volcano/pkg/scheduler/api"
@@ -36,13 +37,6 @@ import (
 const baselinePercentageOfNodesToFind = 50
 
 var lastProcessedNodeIndex int
-
-// Reservation is used to record target job and locked nodes
-var Reservation *ResourceReservation
-
-func init() {
-	Reservation = NewResourceReservation()
-}
 
 // CalculateNumOfFeasibleNodesToFind returns the number of feasible nodes that once found,
 // the scheduler stops its search for more feasible nodes.
@@ -67,65 +61,6 @@ func CalculateNumOfFeasibleNodesToFind(numAllNodes int32) (numNodes int32) {
 	return numNodes
 }
 
-// PredicateNodes returns the specified number of nodes that fit a task
-func PredicateNodes(task *api.TaskInfo, nodes []*api.NodeInfo, fn api.PredicateFn) ([]*api.NodeInfo, *api.FitErrors) {
-	//var workerLock sync.Mutex
-
-	var errorLock sync.Mutex
-	fe := api.NewFitErrors()
-
-	allNodes := len(nodes)
-	if allNodes == 0 {
-		return make([]*api.NodeInfo, 0), fe
-	}
-	numNodesToFind := CalculateNumOfFeasibleNodesToFind(int32(allNodes))
-
-	//allocate enough space to avoid growing it
-	predicateNodes := make([]*api.NodeInfo, numNodesToFind)
-
-	numFoundNodes := int32(0)
-	processedNodes := int32(0)
-
-	//create a context with cancellation
-	ctx, cancel := context.WithCancel(context.Background())
-
-	checkNode := func(index int) {
-		// Check the nodes starting from where is left off in the previous scheduling cycle,
-		// to make sure all nodes have the same chance of being examined across pods.
-		node := nodes[(lastProcessedNodeIndex+index)%allNodes]
-		atomic.AddInt32(&processedNodes, 1)
-		klog.V(4).Infof("Considering Task <%v/%v> on node <%v>: <%v> vs. <%v>",
-			task.Namespace, task.Name, node.Name, task.Resreq, node.Idle)
-
-		// TODO (k82cn): Enable eCache for performance improvement.
-		if err := fn(task, node); err != nil {
-			klog.V(3).Infof("Predicates failed for task <%s/%s> on node <%s>: %v",
-				task.Namespace, task.Name, node.Name, err)
-			errorLock.Lock()
-			fe.SetNodeError(node.Name, err)
-			errorLock.Unlock()
-			return
-		}
-
-		//check if the number of found nodes is more than the numNodesTofind
-		length := atomic.AddInt32(&numFoundNodes, 1)
-		if length > numNodesToFind {
-			cancel()
-			atomic.AddInt32(&numFoundNodes, -1)
-		} else {
-			predicateNodes[length-1] = node
-		}
-	}
-
-	//workqueue.ParallelizeUntil(context.TODO(), 16, len(nodes), checkNode)
-	workqueue.ParallelizeUntil(ctx, 16, allNodes, checkNode)
-
-	//processedNodes := int(numFoundNodes) + len(filteredNodesStatuses) + len(failedPredicateMap)
-	lastProcessedNodeIndex = (lastProcessedNodeIndex + int(processedNodes)) % allNodes
-	predicateNodes = predicateNodes[:numFoundNodes]
-	return predicateNodes, fe
-}
-
 // PrioritizeNodes returns a map whose key is node's score and value are corresponding nodes
 func PrioritizeNodes(task *api.TaskInfo, nodes []*api.NodeInfo, batchFn api.BatchNodeOrderFn, mapFn api.NodeOrderMapFn, reduceFn api.NodeOrderReduceFn) map[float64][]*api.NodeInfo {
 	pluginNodeScoreMap := map[string]k8sframework.NodeScoreList{}
@@ -142,14 +77,14 @@ func PrioritizeNodes(task *api.TaskInfo, nodes []*api.NodeInfo, batchFn api.Batc
 
 		workerLock.Lock()
 		for plugin, score := range mapScores {
-			nodeScoreMap, ok := pluginNodeScoreMap[plugin]
+			nodeScoreList, ok := pluginNodeScoreMap[plugin]
 			if !ok {
-				nodeScoreMap = k8sframework.NodeScoreList{}
+				nodeScoreList = k8sframework.NodeScoreList{}
 			}
 			hp := k8sframework.NodeScore{}
 			hp.Name = node.Name
 			hp.Score = int64(math.Floor(score))
-			pluginNodeScoreMap[plugin] = append(nodeScoreMap, hp)
+			pluginNodeScoreMap[plugin] = append(nodeScoreList, hp)
 		}
 		nodeOrderScoreMap[node.Name] = orderScore
 		workerLock.Unlock()
@@ -167,27 +102,27 @@ func PrioritizeNodes(task *api.TaskInfo, nodes []*api.NodeInfo, batchFn api.Batc
 		return nodeScores
 	}
 
+	nodeScoreMap := map[string]float64{}
 	for _, node := range nodes {
-		if score, found := reduceScores[node.Name]; found {
-			if orderScore, ok := nodeOrderScoreMap[node.Name]; ok {
-				score += orderScore
-			}
-			if batchScore, ok := batchNodeScore[node.Name]; ok {
-				score += batchScore
-			}
-			nodeScores[score] = append(nodeScores[score], node)
-		} else {
-			// If no plugin is applied to this node, the default is 0.0
-			score = 0.0
-			if orderScore, ok := nodeOrderScoreMap[node.Name]; ok {
-				score += orderScore
-			}
-			if batchScore, ok := batchNodeScore[node.Name]; ok {
-				score += batchScore
-			}
-			nodeScores[score] = append(nodeScores[score], node)
+		// If no plugin is applied to this node, the default is 0.0
+		score := 0.0
+		if reduceScore, ok := reduceScores[node.Name]; ok {
+			score += reduceScore
+		}
+		if orderScore, ok := nodeOrderScoreMap[node.Name]; ok {
+			score += orderScore
+		}
+		if batchScore, ok := batchNodeScore[node.Name]; ok {
+			score += batchScore
+		}
+		nodeScores[score] = append(nodeScores[score], node)
+
+		if klog.V(5).Enabled() {
+			nodeScoreMap[node.Name] = score
 		}
 	}
+
+	klog.V(5).Infof("Prioritize nodeScoreMap for task<%s/%s> is: %v", task.Namespace, task.Name, nodeScoreMap)
 	return nodeScores
 }
 
@@ -225,44 +160,33 @@ func SelectBestNode(nodeScores map[float64][]*api.NodeInfo) *api.NodeInfo {
 }
 
 // GetNodeList returns values of the map 'nodes'
-func GetNodeList(nodes map[string]*api.NodeInfo) []*api.NodeInfo {
-	result := make([]*api.NodeInfo, 0, len(nodes))
-	for _, v := range nodes {
-		result = append(result, v)
+func GetNodeList(nodes map[string]*api.NodeInfo, nodeList []string) []*api.NodeInfo {
+	result := make([]*api.NodeInfo, 0, len(nodeList))
+	for _, nodename := range nodeList {
+		if ni, ok := nodes[nodename]; ok {
+			result = append(result, ni)
+		}
 	}
 	return result
 }
 
 // ValidateVictims returns an error if the resources of the victims can't satisfy the preemptor
 func ValidateVictims(preemptor *api.TaskInfo, node *api.NodeInfo, victims []*api.TaskInfo) error {
-	if len(victims) == 0 {
-		return fmt.Errorf("no victims")
-	}
+	// Victims should not be judged to be empty here.
+	// It is possible to complete the scheduling of the preemptor without evicting the task.
+	// In the first round, a large task (CPU: 8) is expelled, and a small task is scheduled (CPU: 2)
+	// When the following rounds of victims are empty, it is still allowed to schedule small tasks (CPU: 2)
 	futureIdle := node.FutureIdle()
 	for _, victim := range victims {
 		futureIdle.Add(victim.Resreq)
 	}
 	// Every resource of the preemptor needs to be less or equal than corresponding
 	// idle resource after preemption.
-	if !preemptor.InitResreq.LessEqualInAllDimension(futureIdle, api.Zero) {
+	if !preemptor.InitResreq.LessEqual(futureIdle, api.Zero) {
 		return fmt.Errorf("not enough resources: requested <%v>, but future idle <%v>",
 			preemptor.InitResreq, futureIdle)
 	}
 	return nil
-}
-
-// ResourceReservation is struct used for resource reservation
-type ResourceReservation struct {
-	TargetJob   *api.JobInfo
-	LockedNodes map[string]*api.NodeInfo
-}
-
-// NewResourceReservation is used to create global instance
-func NewResourceReservation() *ResourceReservation {
-	return &ResourceReservation{
-		TargetJob:   nil,
-		LockedNodes: map[string]*api.NodeInfo{},
-	}
 }
 
 // GetMinInt return minimum int from vals
@@ -271,11 +195,26 @@ func GetMinInt(vals ...int) int {
 		return 0
 	}
 
-	var min int = vals[0]
+	min := vals[0]
 	for _, val := range vals {
 		if val <= min {
 			min = val
 		}
 	}
 	return min
+}
+
+// ConvertRes2ResList convert resource type from api.Resource in scheduler to v1.ResourceList in yaml
+func ConvertRes2ResList(res *api.Resource) v1.ResourceList {
+	var rl = v1.ResourceList{}
+	rl[v1.ResourceCPU] = *resource.NewMilliQuantity(int64(res.MilliCPU), resource.DecimalSI)
+	rl[v1.ResourceMemory] = *resource.NewQuantity(int64(res.Memory), resource.BinarySI)
+	for resourceName, f := range res.ScalarResources {
+		if resourceName == v1.ResourcePods {
+			rl[resourceName] = *resource.NewQuantity(int64(f), resource.DecimalSI)
+			continue
+		}
+		rl[resourceName] = *resource.NewMilliQuantity(int64(f), resource.DecimalSI)
+	}
+	return rl
 }

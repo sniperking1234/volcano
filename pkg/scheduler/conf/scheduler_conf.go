@@ -16,6 +16,9 @@ limitations under the License.
 
 package conf
 
+// EnabledActionMap check if a action exist in scheduler configmap. If not exist the value is false.
+var EnabledActionMap map[string]bool
+
 // SchedulerConfiguration defines the configuration of scheduler.
 type SchedulerConfiguration struct {
 	// Actions defines the actions list of scheduler in order
@@ -23,7 +26,8 @@ type SchedulerConfiguration struct {
 	// Tiers defines plugins in different tiers
 	Tiers []Tier `yaml:"tiers"`
 	// Configurations is configuration for actions
-	Configurations []Configuration `yaml:"configurations"`
+	Configurations       []Configuration   `yaml:"configurations"`
+	MetricsConfiguration map[string]string `yaml:"metrics"`
 }
 
 // Tier defines plugin tier
@@ -36,7 +40,7 @@ type Configuration struct {
 	// Name is name of action
 	Name string `yaml:"name"`
 	// Arguments defines the different arguments that can be given to specified action
-	Arguments map[string]string `yaml:"arguments"`
+	Arguments map[string]interface{} `yaml:"arguments"`
 }
 
 // PluginOption defines the options of plugin
@@ -45,9 +49,7 @@ type PluginOption struct {
 	Name string `yaml:"name"`
 	// EnabledJobOrder defines whether jobOrderFn is enabled
 	EnabledJobOrder *bool `yaml:"enableJobOrder"`
-	// EnabledNamespaceOrder defines whether namespaceOrderFn is enabled
-	EnabledNamespaceOrder *bool `yaml:"enableNamespaceOrder"`
-	// EnabledHierachy defines whether hierarchical sharing is enabled
+	// EnabledHierarchy defines whether hierarchical sharing is enabled
 	EnabledHierarchy *bool `yaml:"enableHierarchy"`
 	// EnabledJobReady defines whether jobReadyFn is enabled
 	EnabledJobReady *bool `yaml:"enableJobReady"`
@@ -59,11 +61,13 @@ type PluginOption struct {
 	EnabledPreemptable *bool `yaml:"enablePreemptable"`
 	// EnabledReclaimable defines whether reclaimableFn is enabled
 	EnabledReclaimable *bool `yaml:"enableReclaimable"`
+	// EnablePreemptive defines whether preemptiveFn is enabled
+	EnablePreemptive *bool `yaml:"enablePreemptive"`
 	// EnabledQueueOrder defines whether queueOrderFn is enabled
 	EnabledQueueOrder *bool `yaml:"enableQueueOrder"`
-	// EnabledPredicate defines whether predicateFn is enabled
-	EnabledClusterOrder *bool `yaml:"EnabledClusterOrder"`
 	// EnableClusterOrder defines whether clusterOrderFn is enabled
+	EnabledClusterOrder *bool `yaml:"EnabledClusterOrder"`
+	// EnabledPredicate defines whether predicateFn is enabled
 	EnabledPredicate *bool `yaml:"enablePredicate"`
 	// EnabledBestNode defines whether bestNodeFn is enabled
 	EnabledBestNode *bool `yaml:"enableBestNode"`
@@ -79,6 +83,10 @@ type PluginOption struct {
 	EnabledVictim *bool `yaml:"enabledVictim"`
 	// EnabledJobStarving defines whether jobStarvingFn is enabled
 	EnabledJobStarving *bool `yaml:"enableJobStarving"`
+	// EnabledOverused defines whether overusedFn is enabled
+	EnabledOverused *bool `yaml:"enabledOverused"`
+	// EnabledAllocatable defines whether allocatable is enabled
+	EnabledAllocatable *bool `yaml:"enabledAllocatable"`
 	// Arguments defines the different arguments that can be given to different plugins
-	Arguments map[string]string `yaml:"arguments"`
+	Arguments map[string]interface{} `yaml:"arguments"`
 }

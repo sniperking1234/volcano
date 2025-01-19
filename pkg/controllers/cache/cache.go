@@ -18,17 +18,18 @@ package cache
 
 import (
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
-
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"volcano.sh/apis/pkg/apis/batch/v1alpha1"
+
 	"volcano.sh/volcano/pkg/controllers/apis"
 )
 
@@ -36,24 +37,24 @@ type jobCache struct {
 	sync.Mutex
 
 	jobs        map[string]*apis.JobInfo
-	deletedJobs workqueue.RateLimitingInterface
+	deletedJobs workqueue.TypedRateLimitingInterface[*apis.JobInfo]
 }
 
 func keyFn(ns, name string) string {
 	return fmt.Sprintf("%s/%s", ns, name)
 }
 
-//JobKeyByName gets the key for the job name.
+// JobKeyByName gets the key for the job name.
 func JobKeyByName(namespace string, name string) string {
 	return keyFn(namespace, name)
 }
 
-//JobKeyByReq gets the key for the job request.
+// JobKeyByReq gets the key for the job request.
 func JobKeyByReq(req *apis.Request) string {
 	return keyFn(req.Namespace, req.JobName)
 }
 
-//JobKey gets the "ns"/"name" format of the given job.
+// JobKey gets the "ns"/"name" format of the given job.
 func JobKey(job *v1alpha1.Job) string {
 	return keyFn(job.Namespace, job.Name)
 }
@@ -74,15 +75,15 @@ func jobKeyOfPod(pod *v1.Pod) (string, error) {
 
 // New gets the job Cache.
 func New() Cache {
-	queue := workqueue.NewMaxOfRateLimiter(
-		workqueue.NewItemExponentialFailureRateLimiter(5*time.Millisecond, 180*time.Second),
+	queue := workqueue.NewTypedMaxOfRateLimiter(
+		workqueue.NewTypedItemExponentialFailureRateLimiter[*apis.JobInfo](5*time.Millisecond, 180*time.Second),
 		// 10 qps, 100 bucket size.  This is only for retry speed and its only the overall factor (not per item)
-		&workqueue.BucketRateLimiter{Limiter: rate.NewLimiter(rate.Limit(10), 100)},
+		&workqueue.TypedBucketRateLimiter[*apis.JobInfo]{Limiter: rate.NewLimiter(rate.Limit(10), 100)},
 	)
 
 	return &jobCache{
 		jobs:        map[string]*apis.JobInfo{},
-		deletedJobs: workqueue.NewRateLimitingQueue(queue),
+		deletedJobs: workqueue.NewTypedRateLimitingQueue(queue),
 	}
 }
 
@@ -153,8 +154,22 @@ func (jc *jobCache) Update(obj *v1alpha1.Job) error {
 	if !found {
 		return fmt.Errorf("failed to find job <%v>", key)
 	}
-	job.Job = obj
 
+	if job.Job != nil {
+		var oldResourceVersion, newResourceVersion uint64
+		var err error
+		if oldResourceVersion, err = strconv.ParseUint(job.Job.ResourceVersion, 10, 64); err != nil {
+			return fmt.Errorf("failed to parase job <%v> resource version <%s>", key, job.Job.ResourceVersion)
+		}
+
+		if newResourceVersion, err = strconv.ParseUint(obj.ResourceVersion, 10, 64); err != nil {
+			return fmt.Errorf("failed to parase job <%v> resource version <%s>", key, obj.ResourceVersion)
+		}
+		if newResourceVersion < oldResourceVersion {
+			return fmt.Errorf("job <%v> has too old resource version: %d (%d)", key, newResourceVersion, oldResourceVersion)
+		}
+	}
+	job.Job = obj
 	return nil
 }
 
@@ -234,7 +249,7 @@ func (jc *jobCache) DeletePod(pod *v1.Pod) error {
 		return err
 	}
 
-	if jc.jobs[key].Job == nil {
+	if jobTerminated(job) {
 		jc.deleteJob(job)
 	}
 
@@ -284,41 +299,92 @@ func (jc *jobCache) TaskCompleted(jobKey, taskName string) bool {
 	return completed >= taskReplicas
 }
 
+func (jc *jobCache) TaskFailed(jobKey, taskName string) bool {
+	jc.Lock()
+	defer jc.Unlock()
+
+	var taskReplicas, retried, maxRetry int32
+
+	jobInfo, found := jc.jobs[jobKey]
+	if !found {
+		return false
+	}
+
+	taskPods, found := jobInfo.Pods[taskName]
+
+	if !found || jobInfo.Job == nil {
+		return false
+	}
+
+	for _, task := range jobInfo.Job.Spec.Tasks {
+		if task.Name == taskName {
+			maxRetry = task.MaxRetry
+			taskReplicas = task.Replicas
+			break
+		}
+	}
+
+	// maxRetry == -1 means no limit
+	if taskReplicas == 0 || maxRetry == -1 {
+		return false
+	}
+
+	// Compatible with existing job
+	if maxRetry == 0 {
+		maxRetry = 3
+	}
+
+	for _, pod := range taskPods {
+		if pod.Status.Phase == v1.PodRunning || pod.Status.Phase == v1.PodPending {
+			for j := range pod.Status.InitContainerStatuses {
+				stat := pod.Status.InitContainerStatuses[j]
+				retried += stat.RestartCount
+			}
+			for j := range pod.Status.ContainerStatuses {
+				stat := pod.Status.ContainerStatuses[j]
+				retried += stat.RestartCount
+			}
+		}
+	}
+	return retried >= maxRetry
+}
+
 func (jc *jobCache) worker() {
 	for jc.processCleanupJob() {
 	}
 }
 
 func (jc *jobCache) processCleanupJob() bool {
-	obj, shutdown := jc.deletedJobs.Get()
+	job, shutdown := jc.deletedJobs.Get()
 	if shutdown {
 		return false
 	}
-	defer jc.deletedJobs.Done(obj)
-
-	job, ok := obj.(*apis.JobInfo)
-	if !ok {
-		klog.Errorf("failed to convert %v to *apis.JobInfo", obj)
-		return true
-	}
+	defer jc.deletedJobs.Done(job)
 
 	jc.Mutex.Lock()
 	defer jc.Mutex.Unlock()
 
 	if jobTerminated(job) {
-		jc.deletedJobs.Forget(obj)
+		jc.deletedJobs.Forget(job)
 		key := keyFn(job.Namespace, job.Name)
 		delete(jc.jobs, key)
 		klog.V(3).Infof("Job <%s> was deleted.", key)
 	} else {
 		// Retry
-		jc.deleteJob(job)
+		jc.retryDeleteJob(job)
 	}
 	return true
 }
 
 func (jc *jobCache) deleteJob(job *apis.JobInfo) {
 	klog.V(3).Infof("Try to delete Job <%v/%v>",
+		job.Namespace, job.Name)
+
+	jc.deletedJobs.Add(job)
+}
+
+func (jc *jobCache) retryDeleteJob(job *apis.JobInfo) {
+	klog.V(3).Infof("Retry to delete Job <%v/%v>",
 		job.Namespace, job.Name)
 
 	jc.deletedJobs.AddRateLimited(job)

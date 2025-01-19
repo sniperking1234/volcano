@@ -37,7 +37,7 @@ import (
 )
 
 type viewFlags struct {
-	commonFlags
+	util.CommonFlags
 
 	Namespace string
 	JobName   string
@@ -54,14 +54,14 @@ var viewJobFlags = &viewFlags{}
 
 // InitViewFlags init the view command flags.
 func InitViewFlags(cmd *cobra.Command) {
-	initFlags(cmd, &viewJobFlags.commonFlags)
+	util.InitFlags(cmd, &viewJobFlags.CommonFlags)
 
 	cmd.Flags().StringVarP(&viewJobFlags.Namespace, "namespace", "n", "default", "the namespace of job")
 	cmd.Flags().StringVarP(&viewJobFlags.JobName, "name", "N", "", "the name of job")
 }
 
 // ViewJob gives full details of the job.
-func ViewJob() error {
+func ViewJob(ctx context.Context) error {
 	config, err := util.BuildConfig(viewJobFlags.Master, viewJobFlags.Kubeconfig)
 	if err != nil {
 		return err
@@ -72,7 +72,7 @@ func ViewJob() error {
 	}
 
 	jobClient := versioned.NewForConfigOrDie(config)
-	job, err := jobClient.BatchV1alpha1().Jobs(viewJobFlags.Namespace).Get(context.TODO(), viewJobFlags.JobName, metav1.GetOptions{})
+	job, err := jobClient.BatchV1alpha1().Jobs(viewJobFlags.Namespace).Get(ctx, viewJobFlags.JobName, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
@@ -81,7 +81,7 @@ func ViewJob() error {
 		return nil
 	}
 	PrintJobInfo(job, os.Stdout)
-	PrintEvents(GetEvents(config, job), os.Stdout)
+	PrintEvents(GetEvents(ctx, config, job), os.Stdout)
 	return nil
 }
 
@@ -109,7 +109,6 @@ func PrintJobInfo(job *v1alpha1.Job, writer io.Writer) {
 	WriteLine(writer, Level1, "Generate Name:     \t%s\n", job.GenerateName)
 	WriteLine(writer, Level1, "Generation:        \t%d\n", job.Generation)
 	WriteLine(writer, Level1, "Resource Version:  \t%s\n", job.ResourceVersion)
-	WriteLine(writer, Level1, "Self Link:         \t%s\n", job.SelfLink)
 	WriteLine(writer, Level1, "UID:               \t%s\n", job.UID)
 
 	WriteLine(writer, Level0, "Spec:\n")
@@ -197,6 +196,14 @@ func PrintJobInfo(job *v1alpha1.Job, writer io.Writer) {
 			WriteLine(writer, Level2, "%s: \t%s\n", key, value)
 		}
 	}
+	if len(job.Status.Conditions) > 0 {
+		WriteLine(writer, Level1, "Conditions:\n    Status\tTransitionTime\n")
+		for _, c := range job.Status.Conditions {
+			WriteLine(writer, Level2, "%v \t%v \n",
+				c.Status,
+				c.LastTransitionTime)
+		}
+	}
 }
 
 // PrintEvents print event info to writer.
@@ -207,9 +214,9 @@ func PrintEvents(events []coreV1.Event, writer io.Writer) {
 		for _, e := range events {
 			var interval string
 			if e.Count > 1 {
-				interval = fmt.Sprintf("%s (x%d over %s)", translateTimestampSince(e.LastTimestamp), e.Count, translateTimestampSince(e.FirstTimestamp))
+				interval = fmt.Sprintf("%s (x%d over %s)", util.TranslateTimestampSince(e.LastTimestamp), e.Count, util.TranslateTimestampSince(e.FirstTimestamp))
 			} else {
-				interval = translateTimestampSince(e.FirstTimestamp)
+				interval = util.TranslateTimestampSince(e.FirstTimestamp)
 			}
 			EventSourceString := []string{e.Source.Component}
 			if len(e.Source.Host) > 0 {
@@ -226,17 +233,16 @@ func PrintEvents(events []coreV1.Event, writer io.Writer) {
 	} else {
 		WriteLine(writer, Level0, "Events: \t<none>\n")
 	}
-
 }
 
 // GetEvents get the job event by config.
-func GetEvents(config *rest.Config, job *v1alpha1.Job) []coreV1.Event {
+func GetEvents(ctx context.Context, config *rest.Config, job *v1alpha1.Job) []coreV1.Event {
 	kubernetes, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		fmt.Printf("%v\n", err)
 		return nil
 	}
-	events, _ := kubernetes.CoreV1().Events(viewJobFlags.Namespace).List(context.TODO(), metav1.ListOptions{})
+	events, _ := kubernetes.CoreV1().Events(viewJobFlags.Namespace).List(ctx, metav1.ListOptions{})
 	var jobEvents []coreV1.Event
 	for _, v := range events.Items {
 		if strings.HasPrefix(v.ObjectMeta.Name, job.Name+".") {

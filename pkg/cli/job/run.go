@@ -19,7 +19,7 @@ package job
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -34,7 +34,7 @@ import (
 )
 
 type runFlags struct {
-	commonFlags
+	util.CommonFlags
 
 	Name      string
 	Namespace string
@@ -52,7 +52,7 @@ var launchJobFlags = &runFlags{}
 
 // InitRunFlags init the run flags.
 func InitRunFlags(cmd *cobra.Command) {
-	initFlags(cmd, &launchJobFlags.commonFlags)
+	util.InitFlags(cmd, &launchJobFlags.CommonFlags)
 
 	cmd.Flags().StringVarP(&launchJobFlags.Image, "image", "i", "busybox", "the container image of job")
 	cmd.Flags().StringVarP(&launchJobFlags.Namespace, "namespace", "n", "default", "the namespace of job")
@@ -68,7 +68,7 @@ func InitRunFlags(cmd *cobra.Command) {
 var jobName = "job.volcano.sh"
 
 // RunJob creates the job.
-func RunJob() error {
+func RunJob(ctx context.Context) error {
 	config, err := util.BuildConfig(launchJobFlags.Master, launchJobFlags.Kubeconfig)
 	if err != nil {
 		return err
@@ -79,12 +79,12 @@ func RunJob() error {
 		return err
 	}
 
-	req, err := populateResourceListV1(launchJobFlags.Requests)
+	req, err := util.PopulateResourceListV1(launchJobFlags.Requests)
 	if err != nil {
 		return err
 	}
 
-	limit, err := populateResourceListV1(launchJobFlags.Limits)
+	limit, err := util.PopulateResourceListV1(launchJobFlags.Limits)
 	if err != nil {
 		return err
 	}
@@ -99,7 +99,7 @@ func RunJob() error {
 	}
 
 	jobClient := versioned.NewForConfigOrDie(config)
-	newJob, err := jobClient.BatchV1alpha1().Jobs(launchJobFlags.Namespace).Create(context.TODO(), job, metav1.CreateOptions{})
+	newJob, err := jobClient.BatchV1alpha1().Jobs(launchJobFlags.Namespace).Create(ctx, job, metav1.CreateOptions{})
 	if err != nil {
 		return err
 	}
@@ -122,7 +122,7 @@ func readFile(filename string) (*vcbatch.Job, error) {
 		return nil, fmt.Errorf("only support yaml file")
 	}
 
-	file, err := ioutil.ReadFile(filename)
+	file, err := os.ReadFile(filename)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file, err: %v", err)
 	}

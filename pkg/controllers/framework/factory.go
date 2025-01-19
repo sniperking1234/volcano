@@ -18,7 +18,8 @@ package framework
 
 import (
 	"fmt"
-	"k8s.io/klog"
+
+	"k8s.io/klog/v2"
 )
 
 var controllers = map[string]Controller{}
@@ -40,7 +41,7 @@ func RegisterController(ctrl Controller) error {
 		return fmt.Errorf("duplicated controller")
 	}
 
-	klog.Infof("Controller <%s> is registered.", ctrl.Name())
+	klog.V(3).Infof("Controller <%s> is registered.", ctrl.Name())
 	controllers[ctrl.Name()] = ctrl
 	return nil
 }

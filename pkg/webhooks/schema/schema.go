@@ -19,12 +19,13 @@ package schema
 import (
 	"fmt"
 
-	"k8s.io/api/admission/v1beta1"
+	admissionv1 "k8s.io/api/admission/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
-	"k8s.io/klog"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/klog/v2"
 	corev1 "k8s.io/kubernetes/pkg/apis/core/v1"
 
 	batchv1alpha1 "volcano.sh/apis/pkg/apis/batch/v1alpha1"
@@ -37,24 +38,24 @@ func init() {
 
 var scheme = runtime.NewScheme()
 
-//Codecs is for retrieving serializers for the supported wire formats
-//and conversion wrappers to define preferred internal and external versions.
+// Codecs is for retrieving serializers for the supported wire formats
+// and conversion wrappers to define preferred internal and external versions.
 var Codecs = serializer.NewCodecFactory(scheme)
 
 func addToScheme(scheme *runtime.Scheme) {
-	corev1.AddToScheme(scheme)
-	v1beta1.AddToScheme(scheme)
+	utilruntime.Must(corev1.AddToScheme(scheme))
+	utilruntime.Must(admissionv1.AddToScheme(scheme))
 }
 
-//DecodeJob decodes the job using deserializer from the raw object.
+// DecodeJob decodes the job using deserializer from the raw object.
 func DecodeJob(object runtime.RawExtension, resource metav1.GroupVersionResource) (*batchv1alpha1.Job, error) {
 	jobResource := metav1.GroupVersionResource{Group: batchv1alpha1.SchemeGroupVersion.Group, Version: batchv1alpha1.SchemeGroupVersion.Version, Resource: "jobs"}
 	raw := object.Raw
 	job := batchv1alpha1.Job{}
 
 	if resource != jobResource {
-		err := fmt.Errorf("expect resource to be %s", jobResource)
-		return &job, err
+		klog.Errorf("expect resource to be %s", jobResource)
+		return &job, fmt.Errorf("expect resource to be %s", jobResource)
 	}
 
 	deserializer := Codecs.UniversalDeserializer()
@@ -72,8 +73,8 @@ func DecodePod(object runtime.RawExtension, resource metav1.GroupVersionResource
 	pod := v1.Pod{}
 
 	if resource != podResource {
-		err := fmt.Errorf("expect resource to be %s", podResource)
-		return &pod, err
+		klog.Errorf("expect resource to be %s", podResource)
+		return &pod, fmt.Errorf("expect resource to be %s", podResource)
 	}
 
 	deserializer := Codecs.UniversalDeserializer()
@@ -94,6 +95,7 @@ func DecodeQueue(object runtime.RawExtension, resource metav1.GroupVersionResour
 	}
 
 	if resource != queueResource {
+		klog.Errorf("expect resource to be %s", queueResource)
 		return nil, fmt.Errorf("expect resource to be %s", queueResource)
 	}
 
@@ -114,6 +116,7 @@ func DecodePodGroup(object runtime.RawExtension, resource metav1.GroupVersionRes
 	}
 
 	if resource != podgroupResource {
+		klog.Errorf("expect resource to be %s", podgroupResource)
 		return nil, fmt.Errorf("expect resource to be %s", podgroupResource)
 	}
 

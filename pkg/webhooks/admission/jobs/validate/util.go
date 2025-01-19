@@ -20,7 +20,6 @@ import (
 	"fmt"
 
 	"github.com/hashicorp/go-multierror"
-
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/kubernetes/pkg/apis/core/validation"
 
@@ -33,10 +32,14 @@ var policyEventMap = map[busv1alpha1.Event]bool{
 	busv1alpha1.AnyEvent:           true,
 	busv1alpha1.PodFailedEvent:     true,
 	busv1alpha1.PodEvictedEvent:    true,
+	busv1alpha1.PodPendingEvent:    true,
 	busv1alpha1.JobUnknownEvent:    true,
 	busv1alpha1.TaskCompletedEvent: true,
+	busv1alpha1.TaskFailedEvent:    true,
+	busv1alpha1.JobUpdatedEvent:    true,
 	busv1alpha1.OutOfSyncEvent:     false,
 	busv1alpha1.CommandIssuedEvent: false,
+	busv1alpha1.PodRunningEvent:    false,
 }
 
 // policyActionMap defines all policy actions and whether to allow external use.
@@ -44,11 +47,15 @@ var policyActionMap = map[busv1alpha1.Action]bool{
 	busv1alpha1.AbortJobAction:     true,
 	busv1alpha1.RestartJobAction:   true,
 	busv1alpha1.RestartTaskAction:  true,
+	busv1alpha1.RestartPodAction:   true,
 	busv1alpha1.TerminateJobAction: true,
 	busv1alpha1.CompleteJobAction:  true,
 	busv1alpha1.ResumeJobAction:    true,
 	busv1alpha1.SyncJobAction:      false,
 	busv1alpha1.EnqueueAction:      false,
+	busv1alpha1.SyncQueueAction:    false,
+	busv1alpha1.OpenQueueAction:    false,
+	busv1alpha1.CloseQueueAction:   false,
 }
 
 func validatePolicies(policies []batchv1alpha1.LifecyclePolicy, fldPath *field.Path) error {
@@ -93,7 +100,6 @@ func validatePolicies(policies []batchv1alpha1.LifecyclePolicy, fldPath *field.P
 			if bFlag {
 				break
 			}
-
 		} else {
 			if *policy.ExitCode == 0 {
 				err = multierror.Append(err, fmt.Errorf("0 is not a valid error code"))
@@ -184,4 +190,63 @@ func validateIO(volumes []batchv1alpha1.VolumeSpec) error {
 		volumeMap[volume.MountPath] = true
 	}
 	return nil
+}
+
+// topoSort uses topo sort to sort job tasks based on dependsOn field
+// it will return an array contains all sorted task names and a bool which indicates whether it's a valid dag
+func topoSort(job *batchv1alpha1.Job) ([]string, bool) {
+	graph, inDegree, taskList := makeGraph(job)
+	var taskStack []string
+	for task, degree := range inDegree {
+		if degree == 0 {
+			taskStack = append(taskStack, task)
+		}
+	}
+
+	sortedTasks := make([]string, 0)
+	for len(taskStack) > 0 {
+		length := len(taskStack)
+		var out string
+		out, taskStack = taskStack[length-1], taskStack[:length-1]
+		sortedTasks = append(sortedTasks, out)
+		for in, connected := range graph[out] {
+			if connected {
+				graph[out][in] = false
+				inDegree[in]--
+				if inDegree[in] == 0 {
+					taskStack = append(taskStack, in)
+				}
+			}
+		}
+	}
+
+	isDag := len(sortedTasks) == len(taskList)
+	if !isDag {
+		return nil, false
+	}
+
+	return sortedTasks, isDag
+}
+
+func makeGraph(job *batchv1alpha1.Job) (map[string]map[string]bool, map[string]int, []string) {
+	graph := make(map[string]map[string]bool)
+	inDegree := make(map[string]int)
+	taskList := make([]string, 0)
+
+	for _, task := range job.Spec.Tasks {
+		taskList = append(taskList, task.Name)
+		inDegree[task.Name] = 0
+		if task.DependsOn != nil {
+			for _, dependOnTask := range task.DependsOn.Name {
+				if graph[dependOnTask] == nil {
+					graph[dependOnTask] = make(map[string]bool)
+				}
+
+				graph[dependOnTask][task.Name] = true
+				inDegree[task.Name]++
+			}
+		}
+	}
+
+	return graph, inDegree, taskList
 }

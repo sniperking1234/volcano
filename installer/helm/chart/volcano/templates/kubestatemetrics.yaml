@@ -1,8 +1,13 @@
+{{- if .Values.custom.metrics_enable }}
+{{ $kube_state_metrics_ns := or .Values.custom.kube_state_metrics_ns .Values.custom.default_ns }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   labels:
     app.kubernetes.io/name: kube-state-metrics
+    {{- if .Values.custom.common_labels }}
+    {{- toYaml .Values.custom.common_labels | nindent 4 }}
+    {{- end }}
   name: kube-state-metrics
 roleRef:
   apiGroup: rbac.authorization.k8s.io
@@ -11,13 +16,16 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: kube-state-metrics
-  namespace: {{ .Release.Namespace }} 
+  namespace: {{ .Release.Namespace }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
   labels:
     app.kubernetes.io/name: kube-state-metrics
+    {{- if .Values.custom.common_labels }}
+    {{- toYaml .Values.custom.common_labels | nindent 4 }}
+    {{- end }}
   name: kube-state-metrics
 rules:
 - apiGroups:
@@ -128,22 +136,28 @@ kind: ServiceAccount
 metadata:
   labels:
     app.kubernetes.io/name: kube-state-metrics
+    {{- if .Values.custom.common_labels }}
+    {{- toYaml .Values.custom.common_labels | nindent 4 }}
+    {{- end }}
   name: kube-state-metrics
   namespace: {{ .Release.Namespace }}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: kube-state-metrics 
+  name: kube-state-metrics
   namespace: {{ .Release.Namespace }}
   labels:
-    k8s-app: kube-state-metrics  
+    k8s-app: kube-state-metrics
+    {{- if .Values.custom.common_labels }}
+    {{- toYaml .Values.custom.common_labels | nindent 4 }}
+    {{- end }}
 spec:
   progressDeadlineSeconds: 600
   replicas: 1
   selector:
     matchLabels:
-      k8s-app: kube-state-metrics 
+      k8s-app: kube-state-metrics
   strategy:
     rollingUpdate:
       maxSurge: 25%
@@ -152,12 +166,15 @@ spec:
   template:
     metadata:
       labels:
-        k8s-app: kube-state-metrics 
+        k8s-app: kube-state-metrics
+        {{- if .Values.custom.common_labels }}
+        {{- toYaml .Values.custom.common_labels | nindent 8 }}
+        {{- end }}
     spec:
       containers:
-        - image: quay.io/coreos/kube-state-metrics:v1.9.7
-          imagePullPolicy: IfNotPresent
-          name: kube-state-metrics 
+        - image: docker.io/volcanosh/kube-state-metrics:v2.0.0-beta
+          imagePullPolicy: {{ .Values.basic.image_pull_policy }}
+          name: kube-state-metrics
           ports:
             - name: http-metrics
               containerPort: 8080
@@ -168,9 +185,8 @@ spec:
             initialDelaySeconds: 5
             timeoutSeconds: 5
       dnsPolicy: ClusterFirst
-      {{ if eq .Values.custom.metrics_enable "true" }}
-      nodeSelector:
-        node.kubernetes.io/instance-type: controlpanel
+      {{ if $kube_state_metrics_ns }}
+      nodeSelector: {{- toYaml $kube_state_metrics_ns | nindent 8 }}
       {{ end }}
       serviceAccountName: kube-state-metrics
 ---
@@ -179,6 +195,9 @@ kind: Service
 metadata:
   labels:
     app.kubernetes.io/name: kube-state-metrics
+    {{- if .Values.custom.common_labels }}
+    {{- toYaml .Values.custom.common_labels | nindent 4 }}
+    {{- end }}
   name: kube-state-metrics
   namespace: {{ .Release.Namespace }}
   annotations:
@@ -186,6 +205,12 @@ metadata:
     prometheus.io/port: "8080"
     prometheus.io/scrape: "true"
 spec:
+  {{- if .Values.service.ipFamilyPolicy }}
+  ipFamilyPolicy: {{ .Values.service.ipFamilyPolicy }}
+  {{- end }}
+  {{- if .Values.service.ipFamilies }}
+  ipFamilies: {{ toYaml .Values.service.ipFamilies | nindent 4 }}
+  {{- end }}
   ports:
   - name: http-metrics
     port: 8080
@@ -195,3 +220,4 @@ spec:
     targetPort: telemetry
   selector:
     k8s-app: kube-state-metrics
+{{- end }}

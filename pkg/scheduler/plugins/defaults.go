@@ -25,9 +25,6 @@ func ApplyPluginConfDefaults(option *conf.PluginOption) {
 	if option.EnabledJobOrder == nil {
 		option.EnabledJobOrder = &t
 	}
-	if option.EnabledNamespaceOrder == nil {
-		option.EnabledNamespaceOrder = &t
-	}
 	if option.EnabledJobReady == nil {
 		option.EnabledJobReady = &t
 	}
@@ -45,6 +42,9 @@ func ApplyPluginConfDefaults(option *conf.PluginOption) {
 	}
 	if option.EnabledReclaimable == nil {
 		option.EnabledReclaimable = &t
+	}
+	if option.EnablePreemptive == nil {
+		option.EnablePreemptive = &t
 	}
 	if option.EnabledQueueOrder == nil {
 		option.EnabledQueueOrder = &t
@@ -69,5 +69,11 @@ func ApplyPluginConfDefaults(option *conf.PluginOption) {
 	}
 	if option.EnabledJobStarving == nil {
 		option.EnabledJobStarving = &t
+	}
+	if option.EnabledOverused == nil {
+		option.EnabledOverused = &t
+	}
+	if option.EnabledAllocatable == nil {
+		option.EnabledAllocatable = &t
 	}
 }

@@ -27,17 +27,18 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/kubernetes"
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	busv1alpha1 "volcano.sh/apis/pkg/apis/bus/v1alpha1"
 	vcclientset "volcano.sh/apis/pkg/client/clientset/versioned"
 	versionedscheme "volcano.sh/apis/pkg/client/clientset/versioned/scheme"
-	informerfactory "volcano.sh/apis/pkg/client/informers/externalversions"
+	vcinformer "volcano.sh/apis/pkg/client/informers/externalversions"
 	busv1alpha1informer "volcano.sh/apis/pkg/client/informers/externalversions/bus/v1alpha1"
 	schedulinginformer "volcano.sh/apis/pkg/client/informers/externalversions/scheduling/v1beta1"
 	busv1alpha1lister "volcano.sh/apis/pkg/client/listers/bus/v1alpha1"
@@ -45,6 +46,7 @@ import (
 	"volcano.sh/volcano/pkg/controllers/apis"
 	"volcano.sh/volcano/pkg/controllers/framework"
 	queuestate "volcano.sh/volcano/pkg/controllers/queue/state"
+	"volcano.sh/volcano/pkg/features"
 )
 
 func init() {
@@ -72,9 +74,11 @@ type queuecontroller struct {
 	cmdLister   busv1alpha1lister.CommandLister
 	cmdSynced   cache.InformerSynced
 
+	vcInformerFactory vcinformer.SharedInformerFactory
+
 	// queues that need to be updated.
-	queue        workqueue.RateLimitingInterface
-	commandQueue workqueue.RateLimitingInterface
+	queue        workqueue.TypedRateLimitingInterface[*apis.Request]
+	commandQueue workqueue.TypedRateLimitingInterface[*busv1alpha1.Command]
 
 	pgMutex sync.RWMutex
 	// queue name -> podgroup namespace/name
@@ -86,6 +90,7 @@ type queuecontroller struct {
 	enqueueQueue func(req *apis.Request)
 
 	recorder      record.EventRecorder
+	workers       uint32
 	maxRequeueNum int
 }
 
@@ -93,13 +98,12 @@ func (c *queuecontroller) Name() string {
 	return "queue-controller"
 }
 
-// NewQueueController creates a QueueController.
+// Initialize creates  QueueController from option.
 func (c *queuecontroller) Initialize(opt *framework.ControllerOption) error {
-
 	c.vcClient = opt.VolcanoClient
 	c.kubeClient = opt.KubeClient
 
-	factory := informerfactory.NewSharedInformerFactory(c.vcClient, 0)
+	factory := opt.VCSharedInformerFactory
 	queueInformer := factory.Scheduling().V1beta1().Queues()
 	pgInformer := factory.Scheduling().V1beta1().PodGroups()
 
@@ -107,20 +111,22 @@ func (c *queuecontroller) Initialize(opt *framework.ControllerOption) error {
 	eventBroadcaster.StartLogging(klog.Infof)
 	eventBroadcaster.StartRecordingToSink(&corev1.EventSinkImpl{Interface: c.kubeClient.CoreV1().Events("")})
 
+	c.vcInformerFactory = factory
 	c.queueInformer = queueInformer
 	c.pgInformer = pgInformer
 	c.queueLister = queueInformer.Lister()
 	c.queueSynced = queueInformer.Informer().HasSynced
 	c.pgLister = pgInformer.Lister()
 	c.pgSynced = pgInformer.Informer().HasSynced
-	c.queue = workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
-	c.commandQueue = workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
+	c.queue = workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[*apis.Request]())
+	c.commandQueue = workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[*busv1alpha1.Command]())
 	c.podGroups = make(map[string]map[string]struct{})
 	c.recorder = eventBroadcaster.NewRecorder(versionedscheme.Scheme, v1.EventSource{Component: "vc-controller-manager"})
 	c.maxRequeueNum = opt.MaxRequeueNum
 	if c.maxRequeueNum < 0 {
 		c.maxRequeueNum = -1
 	}
+	c.workers = opt.WorkerThreadsForQueue
 
 	queueInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    c.addQueue,
@@ -134,22 +140,24 @@ func (c *queuecontroller) Initialize(opt *framework.ControllerOption) error {
 		DeleteFunc: c.deletePodGroup,
 	})
 
-	c.cmdInformer = informerfactory.NewSharedInformerFactory(c.vcClient, 0).Bus().V1alpha1().Commands()
-	c.cmdInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
-		FilterFunc: func(obj interface{}) bool {
-			switch v := obj.(type) {
-			case *busv1alpha1.Command:
-				return IsQueueReference(v.TargetObject)
-			default:
-				return false
-			}
-		},
-		Handler: cache.ResourceEventHandlerFuncs{
-			AddFunc: c.addCommand,
-		},
-	})
-	c.cmdLister = c.cmdInformer.Lister()
-	c.cmdSynced = c.cmdInformer.Informer().HasSynced
+	if utilfeature.DefaultFeatureGate.Enabled(features.QueueCommandSync) {
+		c.cmdInformer = factory.Bus().V1alpha1().Commands()
+		c.cmdInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
+			FilterFunc: func(obj interface{}) bool {
+				switch v := obj.(type) {
+				case *busv1alpha1.Command:
+					return IsQueueReference(v.TargetObject)
+				default:
+					return false
+				}
+			},
+			Handler: cache.ResourceEventHandlerFuncs{
+				AddFunc: c.addCommand,
+			},
+		})
+		c.cmdLister = c.cmdInformer.Lister()
+		c.cmdSynced = c.cmdInformer.Informer().HasSynced
+	}
 
 	queuestate.SyncQueue = c.syncQueue
 	queuestate.OpenQueue = c.openQueue
@@ -172,17 +180,19 @@ func (c *queuecontroller) Run(stopCh <-chan struct{}) {
 	klog.Infof("Starting queue controller.")
 	defer klog.Infof("Shutting down queue controller.")
 
-	go c.queueInformer.Informer().Run(stopCh)
-	go c.pgInformer.Informer().Run(stopCh)
-	go c.cmdInformer.Informer().Run(stopCh)
+	c.vcInformerFactory.Start(stopCh)
 
-	if !cache.WaitForCacheSync(stopCh, c.queueSynced, c.pgSynced, c.cmdSynced) {
-		klog.Errorf("unable to sync caches for queue controller.")
-		return
+	for informerType, ok := range c.vcInformerFactory.WaitForCacheSync(stopCh) {
+		if !ok {
+			klog.Errorf("caches failed to sync: %v", informerType)
+			return
+		}
 	}
 
-	go wait.Until(c.worker, 0, stopCh)
-	go wait.Until(c.commandWorker, 0, stopCh)
+	for i := 0; i < int(c.workers); i++ {
+		go wait.Until(c.worker, 0, stopCh)
+		go wait.Until(c.commandWorker, 0, stopCh)
+	}
 
 	<-stopCh
 }
@@ -197,20 +207,14 @@ func (c *queuecontroller) worker() {
 }
 
 func (c *queuecontroller) processNextWorkItem() bool {
-	obj, shutdown := c.queue.Get()
+	req, shutdown := c.queue.Get()
 	if shutdown {
 		return false
 	}
-	defer c.queue.Done(obj)
-
-	req, ok := obj.(*apis.Request)
-	if !ok {
-		klog.Errorf("%v is not a valid queue request struct.", obj)
-		return true
-	}
+	defer c.queue.Done(req)
 
 	err := c.syncHandler(req)
-	c.handleQueueErr(err, obj)
+	c.handleQueueErr(err, req)
 
 	return true
 }
@@ -245,23 +249,22 @@ func (c *queuecontroller) handleQueue(req *apis.Request) error {
 	return nil
 }
 
-func (c *queuecontroller) handleQueueErr(err error, obj interface{}) {
+func (c *queuecontroller) handleQueueErr(err error, req *apis.Request) {
 	if err == nil {
-		c.queue.Forget(obj)
+		c.queue.Forget(req)
 		return
 	}
 
-	if c.maxRequeueNum == -1 || c.queue.NumRequeues(obj) < c.maxRequeueNum {
-		klog.V(4).Infof("Error syncing queue request %v for %v.", obj, err)
-		c.queue.AddRateLimited(obj)
+	if c.maxRequeueNum == -1 || c.queue.NumRequeues(req) < c.maxRequeueNum {
+		klog.V(4).Infof("Error syncing queue request %v for %v.", req, err)
+		c.queue.AddRateLimited(req)
 		return
 	}
 
-	req, _ := obj.(*apis.Request)
 	c.recordEventsForQueue(req.QueueName, v1.EventTypeWarning, string(req.Action),
 		fmt.Sprintf("%v queue failed for %v", req.Action, err))
-	klog.V(2).Infof("Dropping queue request %v out of the queue for %v.", obj, err)
-	c.queue.Forget(obj)
+	klog.V(2).Infof("Dropping queue request %v out of the queue for %v.", req, err)
+	c.queue.Forget(req)
 }
 
 func (c *queuecontroller) commandWorker() {
@@ -270,20 +273,14 @@ func (c *queuecontroller) commandWorker() {
 }
 
 func (c *queuecontroller) processNextCommand() bool {
-	obj, shutdown := c.commandQueue.Get()
+	cmd, shutdown := c.commandQueue.Get()
 	if shutdown {
 		return false
 	}
-	defer c.commandQueue.Done(obj)
-
-	cmd, ok := obj.(*busv1alpha1.Command)
-	if !ok {
-		klog.Errorf("%v is not a valid Command struct.", obj)
-		return true
-	}
+	defer c.commandQueue.Done(cmd)
 
 	err := c.syncCommandHandler(cmd)
-	c.handleCommandErr(err, obj)
+	c.handleCommandErr(err, cmd)
 
 	return true
 }
@@ -314,18 +311,18 @@ func (c *queuecontroller) handleCommand(cmd *busv1alpha1.Command) error {
 	return nil
 }
 
-func (c *queuecontroller) handleCommandErr(err error, obj interface{}) {
+func (c *queuecontroller) handleCommandErr(err error, cmd *busv1alpha1.Command) {
 	if err == nil {
-		c.commandQueue.Forget(obj)
+		c.commandQueue.Forget(cmd)
 		return
 	}
 
-	if c.maxRequeueNum == -1 || c.commandQueue.NumRequeues(obj) < c.maxRequeueNum {
-		klog.V(4).Infof("Error syncing command %v for %v.", obj, err)
-		c.commandQueue.AddRateLimited(obj)
+	if c.maxRequeueNum == -1 || c.commandQueue.NumRequeues(cmd) < c.maxRequeueNum {
+		klog.V(4).Infof("Error syncing command %v for %v.", cmd, err)
+		c.commandQueue.AddRateLimited(cmd)
 		return
 	}
 
-	klog.V(2).Infof("Dropping command %v out of the queue for %v.", obj, err)
-	c.commandQueue.Forget(obj)
+	klog.V(2).Infof("Dropping command %v out of the queue for %v.", cmd, err)
+	c.commandQueue.Forget(cmd)
 }

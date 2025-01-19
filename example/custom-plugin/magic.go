@@ -17,7 +17,7 @@ limitations under the License.
 package main // note!!! package must be named main
 
 import (
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	"volcano.sh/volcano/pkg/scheduler/framework"
 )
@@ -30,7 +30,8 @@ func (mp *magicPlugin) Name() string {
 	return PluginName
 }
 
-func New(arguments framework.Arguments) framework.Plugin { // `New` is PluginBuilder
+// New is a PluginBuilder, remove the comment when used.
+func New(arguments framework.Arguments) framework.Plugin {
 	return &magicPlugin{}
 }
 

@@ -17,8 +17,9 @@ limitations under the License.
 package scheduler
 
 import (
+	"flag"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"strings"
 
 	"gopkg.in/yaml.v2"
@@ -26,28 +27,31 @@ import (
 	"volcano.sh/volcano/pkg/scheduler/conf"
 	"volcano.sh/volcano/pkg/scheduler/framework"
 	"volcano.sh/volcano/pkg/scheduler/plugins"
+	"volcano.sh/volcano/pkg/util"
 )
 
-var defaultSchedulerConf = `
+var DefaultSchedulerConf = `
 actions: "enqueue, allocate, backfill"
 tiers:
 - plugins:
   - name: priority
   - name: gang
+  - name: conformance
 - plugins:
+  - name: overcommit
   - name: drf
   - name: predicates
   - name: proportion
   - name: nodeorder
 `
 
-func unmarshalSchedulerConf(confStr string) ([]framework.Action, []conf.Tier, []conf.Configuration, error) {
+func UnmarshalSchedulerConf(confStr string) ([]framework.Action, []conf.Tier, []conf.Configuration, map[string]string, error) {
 	var actions []framework.Action
 
 	schedulerConf := &conf.SchedulerConfiguration{}
 
 	if err := yaml.Unmarshal([]byte(confStr), schedulerConf); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	// Set default settings for each plugin if not set
 	for i, tier := range schedulerConf.Tiers {
@@ -67,7 +71,7 @@ func unmarshalSchedulerConf(confStr string) ([]framework.Action, []conf.Tier, []
 			plugins.ApplyPluginConfDefaults(&schedulerConf.Tiers[i].Plugins[j])
 		}
 		if hdrf && proportion {
-			return nil, nil, nil, fmt.Errorf("proportion and drf with hierarchy enabled conflicts")
+			return nil, nil, nil, nil, fmt.Errorf("proportion and drf with hierarchy enabled conflicts")
 		}
 	}
 
@@ -76,17 +80,19 @@ func unmarshalSchedulerConf(confStr string) ([]framework.Action, []conf.Tier, []
 		if action, found := framework.GetAction(strings.TrimSpace(actionName)); found {
 			actions = append(actions, action)
 		} else {
-			return nil, nil, nil, fmt.Errorf("failed to found Action %s, ignore it", actionName)
+			return nil, nil, nil, nil, fmt.Errorf("failed to find Action %s, ignore it", actionName)
 		}
 	}
 
-	return actions, schedulerConf.Tiers, schedulerConf.Configurations, nil
+	return actions, schedulerConf.Tiers, schedulerConf.Configurations, schedulerConf.MetricsConfiguration, nil
 }
 
-func readSchedulerConf(confPath string) (string, error) {
-	dat, err := ioutil.ReadFile(confPath)
-	if err != nil {
-		return "", err
+func runSchedulerSocket() {
+	fs := flag.CommandLine
+	startKlogLevel := fs.Lookup("v").Value.String()
+	socketDir := os.Getenv(util.SocketDirEnvName)
+	if socketDir == "" {
+		socketDir = util.DefaultSocketDir
 	}
-	return string(dat), nil
+	util.ListenAndServeKlogLogLevel("klog", startKlogLevel, socketDir)
 }

@@ -23,6 +23,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+
+	"volcano.sh/apis/pkg/apis/scheduling"
 )
 
 func buildNode(name string, alloc v1.ResourceList) *v1.Node {
@@ -62,18 +64,19 @@ func buildPod(ns, n, nn string, p v1.PodPhase, req v1.ResourceList, owner []meta
 	}
 }
 
-func buildResourceList(cpu string, memory string) v1.ResourceList {
-	return v1.ResourceList{
+func buildResource(cpu string, memory string, scalarResources map[string]string, maxTaskNum int) *Resource {
+	resourceList := v1.ResourceList{
 		v1.ResourceCPU:    resource.MustParse(cpu),
 		v1.ResourceMemory: resource.MustParse(memory),
 	}
-}
-
-func buildResource(cpu string, memory string) *Resource {
-	return NewResource(v1.ResourceList{
-		v1.ResourceCPU:    resource.MustParse(cpu),
-		v1.ResourceMemory: resource.MustParse(memory),
-	})
+	for key, value := range scalarResources {
+		resourceList[v1.ResourceName(key)] = resource.MustParse(value)
+	}
+	resource := NewResource(resourceList)
+	if maxTaskNum != -1 {
+		resource.MaxTaskNum = maxTaskNum
+	}
+	return resource
 }
 
 func buildOwnerReference(owner string) metav1.OwnerReference {
@@ -81,5 +84,53 @@ func buildOwnerReference(owner string) metav1.OwnerReference {
 	return metav1.OwnerReference{
 		Controller: &controller,
 		UID:        types.UID(owner),
+	}
+}
+
+type ScalarResource struct {
+	Name  string
+	Value string
+}
+
+// BuildResourceList builds resource list object
+func BuildResourceList(cpu string, memory string, scalarResources ...ScalarResource) v1.ResourceList {
+	resourceList := v1.ResourceList{}
+
+	if len(cpu) > 0 {
+		resourceList[v1.ResourceCPU] = resource.MustParse(cpu)
+	}
+
+	if len(memory) > 0 {
+		resourceList[v1.ResourceMemory] = resource.MustParse(memory)
+	}
+
+	for _, scalar := range scalarResources {
+		resourceList[v1.ResourceName(scalar.Name)] = resource.MustParse(scalar.Value)
+	}
+
+	return resourceList
+}
+
+// BuildResourceListWithGPU builds resource list with GPU
+func BuildResourceListWithGPU(cpu string, memory string, GPU string, scalarResources ...ScalarResource) v1.ResourceList {
+	resourceList := BuildResourceList(cpu, memory, scalarResources...)
+	if len(GPU) > 0 {
+		resourceList[GPUResourceName] = resource.MustParse(GPU)
+	}
+
+	return resourceList
+}
+
+// BuildPodgroup builds podgroup
+func BuildPodgroup(name, ns string, minMember int32, minResource v1.ResourceList) scheduling.PodGroup {
+	return scheduling.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: ns,
+			Name:      name,
+		},
+		Spec: scheduling.PodGroupSpec{
+			MinMember:    minMember,
+			MinResources: &minResource,
+		},
 	}
 }

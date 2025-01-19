@@ -17,21 +17,26 @@ limitations under the License.
 package podgroup
 
 import (
-	v1 "k8s.io/api/core/v1"
+	"slices"
+
 	"k8s.io/apimachinery/pkg/util/wait"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/client-go/informers"
+	appinformers "k8s.io/client-go/informers/apps/v1"
 	coreinformers "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	scheduling "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 	vcclientset "volcano.sh/apis/pkg/client/clientset/versioned"
-	informerfactory "volcano.sh/apis/pkg/client/informers/externalversions"
+	vcinformer "volcano.sh/apis/pkg/client/informers/externalversions"
 	schedulinginformer "volcano.sh/apis/pkg/client/informers/externalversions/scheduling/v1beta1"
 	schedulinglister "volcano.sh/apis/pkg/client/listers/scheduling/v1beta1"
 	"volcano.sh/volcano/pkg/controllers/framework"
+	"volcano.sh/volcano/pkg/features"
 )
 
 func init() {
@@ -45,6 +50,10 @@ type pgcontroller struct {
 
 	podInformer coreinformers.PodInformer
 	pgInformer  schedulinginformer.PodGroupInformer
+	rsInformer  appinformers.ReplicaSetInformer
+
+	informerFactory   informers.SharedInformerFactory
+	vcInformerFactory vcinformer.SharedInformerFactory
 
 	// A store of pods
 	podLister corelisters.PodLister
@@ -54,7 +63,16 @@ type pgcontroller struct {
 	pgLister schedulinglister.PodGroupLister
 	pgSynced func() bool
 
-	queue workqueue.RateLimitingInterface
+	// A store of replicaset
+	rsSynced func() bool
+
+	queue workqueue.TypedRateLimitingInterface[podRequest]
+
+	schedulerNames []string
+	workers        uint32
+
+	// To determine whether inherit owner's annotations for pods when create podgroup
+	inheritOwnerAnnotations bool
 }
 
 func (pg *pgcontroller) Name() string {
@@ -63,49 +81,61 @@ func (pg *pgcontroller) Name() string {
 
 // Initialize create new Podgroup Controller.
 func (pg *pgcontroller) Initialize(opt *framework.ControllerOption) error {
-
 	pg.kubeClient = opt.KubeClient
 	pg.vcClient = opt.VolcanoClient
+	pg.workers = opt.WorkerThreadsForPG
 
-	pg.queue = workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
+	pg.queue = workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[podRequest]())
 
+	pg.schedulerNames = make([]string, len(opt.SchedulerNames))
+	copy(pg.schedulerNames, opt.SchedulerNames)
+	pg.inheritOwnerAnnotations = opt.InheritOwnerAnnotations
+
+	pg.informerFactory = opt.SharedInformerFactory
 	pg.podInformer = opt.SharedInformerFactory.Core().V1().Pods()
 	pg.podLister = pg.podInformer.Lister()
 	pg.podSynced = pg.podInformer.Informer().HasSynced
-	pg.podInformer.Informer().AddEventHandler(
-		cache.FilteringResourceEventHandler{
-			FilterFunc: func(obj interface{}) bool {
-				switch v := obj.(type) {
-				case *v1.Pod:
-					if v.Spec.SchedulerName == opt.SchedulerName &&
-						(v.Annotations == nil || v.Annotations[scheduling.KubeGroupNameAnnotationKey] == "") {
-						return true
-					}
-					return false
-				default:
-					return false
-				}
-			},
-			Handler: cache.ResourceEventHandlerFuncs{
-				AddFunc: pg.addPod,
-			},
-		})
+	pg.podInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: pg.addPod,
+	})
 
-	pg.pgInformer = informerfactory.NewSharedInformerFactory(pg.vcClient, 0).Scheduling().V1beta1().PodGroups()
+	factory := opt.VCSharedInformerFactory
+	pg.vcInformerFactory = factory
+	pg.pgInformer = factory.Scheduling().V1beta1().PodGroups()
 	pg.pgLister = pg.pgInformer.Lister()
 	pg.pgSynced = pg.pgInformer.Informer().HasSynced
 
+	if utilfeature.DefaultFeatureGate.Enabled(features.WorkLoadSupport) {
+		pg.rsInformer = pg.informerFactory.Apps().V1().ReplicaSets()
+		pg.rsSynced = pg.rsInformer.Informer().HasSynced
+		pg.rsInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc:    pg.addReplicaSet,
+			UpdateFunc: pg.updateReplicaSet,
+		})
+	}
 	return nil
 }
 
 // Run start NewPodgroupController.
 func (pg *pgcontroller) Run(stopCh <-chan struct{}) {
-	go pg.podInformer.Informer().Run(stopCh)
-	go pg.pgInformer.Informer().Run(stopCh)
+	pg.informerFactory.Start(stopCh)
+	pg.vcInformerFactory.Start(stopCh)
 
-	cache.WaitForCacheSync(stopCh, pg.podSynced, pg.pgSynced)
+	for informerType, ok := range pg.informerFactory.WaitForCacheSync(stopCh) {
+		if !ok {
+			klog.Errorf("caches failed to sync: %v", informerType)
+		}
+	}
+	for informerType, ok := range pg.vcInformerFactory.WaitForCacheSync(stopCh) {
+		if !ok {
+			klog.Errorf("caches failed to sync: %v", informerType)
+			return
+		}
+	}
 
-	go wait.Until(pg.worker, 0, stopCh)
+	for i := 0; i < int(pg.workers); i++ {
+		go wait.Until(pg.worker, 0, stopCh)
+	}
 
 	klog.Infof("PodgroupController is running ...... ")
 }
@@ -116,13 +146,12 @@ func (pg *pgcontroller) worker() {
 }
 
 func (pg *pgcontroller) processNextReq() bool {
-	obj, shutdown := pg.queue.Get()
+	req, shutdown := pg.queue.Get()
 	if shutdown {
 		klog.Errorf("Fail to pop item from queue")
 		return false
 	}
 
-	req := obj.(podRequest)
 	defer pg.queue.Done(req)
 
 	pod, err := pg.podLister.Pods(req.podNamespace).Get(req.podName)
@@ -131,7 +160,18 @@ func (pg *pgcontroller) processNextReq() bool {
 		return true
 	}
 
+	if !slices.Contains(pg.schedulerNames, pod.Spec.SchedulerName) {
+		klog.V(5).Infof("pod %v/%v field SchedulerName is not matched", pod.Namespace, pod.Name)
+		return true
+	}
+
+	if pod.Annotations != nil && pod.Annotations[scheduling.KubeGroupNameAnnotationKey] != "" {
+		klog.V(5).Infof("pod %v/%v has created podgroup", pod.Namespace, pod.Name)
+		return true
+	}
+
 	// normal pod use volcano
+	klog.V(4).Infof("Try to create podgroup for pod %s/%s", pod.Namespace, pod.Name)
 	if err := pg.createNormalPodPGIfNotExist(pod); err != nil {
 		klog.Errorf("Failed to handle Pod <%s/%s>: %v", pod.Namespace, pod.Name, err)
 		pg.queue.AddRateLimited(req)

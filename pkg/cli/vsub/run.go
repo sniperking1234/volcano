@@ -117,13 +117,12 @@ func setDefaultArgs() {
 			launchJobFlags.Namespace = defaultJobNamespace
 		}
 	}
-
 }
 
 var jobName = "job.volcano.sh"
 
 // RunJob creates the job.
-func RunJob() error {
+func RunJob(ctx context.Context) error {
 	config, err := util.BuildConfig(launchJobFlags.Master, launchJobFlags.Kubeconfig)
 	if err != nil {
 		return err
@@ -150,7 +149,7 @@ func RunJob() error {
 	}
 
 	jobClient := versioned.NewForConfigOrDie(config)
-	newJob, err := jobClient.BatchV1alpha1().Jobs(launchJobFlags.Namespace).Create(context.TODO(), job, metav1.CreateOptions{})
+	newJob, err := jobClient.BatchV1alpha1().Jobs(launchJobFlags.Namespace).Create(ctx, job, metav1.CreateOptions{})
 	if err != nil {
 		return err
 	}
@@ -165,7 +164,6 @@ func RunJob() error {
 }
 
 func constructLaunchJobFlagsJob(launchJobFlags *runFlags, req, limit v1.ResourceList) (*vcbatch.Job, error) {
-
 	var commands []string
 
 	if launchJobFlags.Command != "" {

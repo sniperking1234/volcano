@@ -19,7 +19,7 @@ package jobp
 import (
 	"context"
 
-	. "github.com/onsi/ginkgo"
+	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	v12 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -32,7 +32,8 @@ import (
 
 var _ = Describe("Job E2E Test: Test Job PVCs", func() {
 	It("use exisisting PVC in job", func() {
-		Skip("Skip temporarily for there may be some bugs and fix is on the way")
+		// PVC related e2e verification fails probabilistically, See issue: #3102
+		Skip("PVC related e2e verification fails probabilistically, See issue: #3102")
 		jobName := "job-pvc-name-exist"
 		taskName := "pvctask"
 		pvName := "job-pv-name"
@@ -75,7 +76,7 @@ var _ = Describe("Job E2E Test: Test Job PVCs", func() {
 			Spec: v12.PersistentVolumeClaimSpec{
 				StorageClassName: &storageClsName,
 				VolumeName:       pvName,
-				Resources: v12.ResourceRequirements{
+				Resources: v12.VolumeResourceRequirements{
 					Requests: v12.ResourceList{
 						v12.ResourceName(v12.ResourceStorage): resource.MustParse("1Gi"),
 					},
@@ -89,7 +90,7 @@ var _ = Describe("Job E2E Test: Test Job PVCs", func() {
 		Expect(err1).NotTo(HaveOccurred(), "pvc creation")
 
 		pvSpec := &v12.PersistentVolumeClaimSpec{
-			Resources: v12.ResourceRequirements{
+			Resources: v12.VolumeResourceRequirements{
 				Requests: v12.ResourceList{
 					v12.ResourceName(v12.ResourceStorage): resource.MustParse("1Gi"),
 				},
@@ -171,22 +172,30 @@ var _ = Describe("Job E2E Test: Test Job PVCs", func() {
 		})
 
 		expected := map[string]int64{
-			"cpu":            2,
-			"memory":         1024 * 1024 * 2000,
-			"nvidia.com/gpu": 2,
+			"count/pods":              2,
+			"cpu":                     2,
+			"memory":                  1024 * 1024 * 2000,
+			"nvidia.com/gpu":          2,
+			"limits.cpu":              2,
+			"limits.memory":           1024 * 1024 * 2000,
+			"requests.memory":         1024 * 1024 * 2000,
+			"requests.nvidia.com/gpu": 2,
+			"pods":                    2,
+			"requests.cpu":            2,
 		}
 
 		err := e2eutil.WaitJobStatePending(ctx, job)
 		Expect(err).NotTo(HaveOccurred())
 
-		pGroup, err := ctx.Vcclient.SchedulingV1beta1().PodGroups(ctx.Namespace).Get(context.TODO(), jobName, metav1.GetOptions{})
+		pgName := jobName + "-" + string(job.UID)
+		pGroup, err := ctx.Vcclient.SchedulingV1beta1().PodGroups(ctx.Namespace).Get(context.TODO(), pgName, metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred())
 
-		for name, q := range *pGroup.Spec.MinResources {
-			value, ok := expected[string(name)]
+		minReq := *pGroup.Spec.MinResources
+		for name, q := range expected {
+			value, ok := minReq[v12.ResourceName(name)]
 			Expect(ok).To(Equal(true), "Resource %s should exists in PodGroup", name)
-			Expect(q.Value()).To(Equal(value), "Resource %s 's value should equal to %d", name, value)
+			Expect(q).To(Equal(value.Value()), "Resource %s 's value should equal to %d", name, value)
 		}
-
 	})
 })

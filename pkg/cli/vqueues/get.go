@@ -67,7 +67,6 @@ func InitGetFlags(cmd *cobra.Command) {
 	util.InitFlags(cmd, &getQueueFlags.CommonFlags)
 
 	cmd.Flags().StringVarP(&getQueueFlags.Name, "name", "n", "", "the name of queue")
-
 }
 
 // ListQueue lists all the queue.
@@ -107,11 +106,10 @@ func PrintQueues(queues *v1beta1.QueueList, writer io.Writer) {
 			fmt.Printf("Failed to print queue command result: %s.\n", err)
 		}
 	}
-
 }
 
 // GetQueue gets a queue.
-func GetQueue() error {
+func GetQueue(ctx context.Context) error {
 	config, err := util.BuildConfig(getQueueFlags.Master, getQueueFlags.Kubeconfig)
 	if err != nil {
 		return err
@@ -123,7 +121,7 @@ func GetQueue() error {
 	}
 
 	queueClient := versioned.NewForConfigOrDie(config)
-	queue, err := queueClient.SchedulingV1beta1().Queues().Get(context.TODO(), getQueueFlags.Name, metav1.GetOptions{})
+	queue, err := queueClient.SchedulingV1beta1().Queues().Get(ctx, getQueueFlags.Name, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}

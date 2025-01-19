@@ -31,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/klog/v2"
 
 	batchv1alpha1 "volcano.sh/apis/pkg/apis/batch/v1alpha1"
 	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
@@ -52,6 +53,8 @@ type TaskSpec struct {
 	Tolerations           []v1.Toleration
 	DefaultGracefulPeriod *int64
 	Taskpriority          string
+	MaxRetry              int32
+	SchGates              []v1.PodSchedulingGate
 }
 
 type JobSpec struct {
@@ -66,8 +69,10 @@ type JobSpec struct {
 	Volumes   []batchv1alpha1.VolumeSpec
 	NodeName  string
 	// ttl seconds after job finished
-	Ttl        *int32
+	TTL        *int32
 	MinSuccess *int32
+	// job max retry
+	MaxRetry int32
 }
 
 func Namespace(context *TestContext, job *JobSpec) string {
@@ -98,7 +103,7 @@ func CreateJobWithPodGroup(ctx *TestContext, jobSpec *JobSpec,
 			Policies:                jobSpec.Policies,
 			Queue:                   jobSpec.Queue,
 			Plugins:                 jobSpec.Plugins,
-			TTLSecondsAfterFinished: jobSpec.Ttl,
+			TTLSecondsAfterFinished: jobSpec.TTL,
 		},
 	}
 
@@ -194,8 +199,9 @@ func CreateJobInner(ctx *TestContext, jobSpec *JobSpec) (*batchv1alpha1.Job, err
 			Policies:                jobSpec.Policies,
 			Queue:                   jobSpec.Queue,
 			Plugins:                 jobSpec.Plugins,
-			TTLSecondsAfterFinished: jobSpec.Ttl,
+			TTLSecondsAfterFinished: jobSpec.TTL,
 			MinSuccess:              jobSpec.MinSuccess,
+			MaxRetry:                jobSpec.MaxRetry,
 		},
 	}
 
@@ -211,10 +217,16 @@ func CreateJobInner(ctx *TestContext, jobSpec *JobSpec) (*batchv1alpha1.Job, err
 			restartPolicy = task.RestartPolicy
 		}
 
+		maxRetry := task.MaxRetry
+		if maxRetry == 0 {
+			maxRetry = -1
+		}
+
 		ts := batchv1alpha1.TaskSpec{
 			Name:     name,
 			Replicas: task.Rep,
 			Policies: task.Policies,
+			MaxRetry: maxRetry,
 			Template: v1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:   name,
@@ -226,6 +238,7 @@ func CreateJobInner(ctx *TestContext, jobSpec *JobSpec) (*batchv1alpha1.Job, err
 					Affinity:          task.Affinity,
 					Tolerations:       task.Tolerations,
 					PriorityClassName: task.Taskpriority,
+					SchedulingGates:   task.SchGates,
 				},
 			},
 		}
@@ -263,21 +276,30 @@ func CreateJobInner(ctx *TestContext, jobSpec *JobSpec) (*batchv1alpha1.Job, err
 
 func WaitTaskPhase(ctx *TestContext, job *batchv1alpha1.Job, phase []v1.PodPhase, taskNum int) error {
 	var additionalError error
+	var podNotReadyCache map[string]*v1.Pod
 	err := wait.Poll(100*time.Millisecond, FiveMinute, func() (bool, error) {
 		pods, err := ctx.Kubeclient.CoreV1().Pods(job.Namespace).List(context.TODO(), metav1.ListOptions{})
 		Expect(err).NotTo(HaveOccurred(), "failed to list pods in namespace %s", job.Namespace)
 
 		readyTaskNum := 0
+		podNotReadyCache = make(map[string]*v1.Pod)
 		for _, pod := range pods.Items {
 			if !metav1.IsControlledBy(&pod, job) {
 				continue
 			}
 
+			podReady := false
 			for _, p := range phase {
 				if pod.Status.Phase == p {
 					readyTaskNum++
+					podReady = true
 					break
 				}
+			}
+
+			if !podReady {
+				podKey := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
+				podNotReadyCache[podKey] = &pod
 			}
 		}
 
@@ -290,9 +312,25 @@ func WaitTaskPhase(ctx *TestContext, job *batchv1alpha1.Job, phase []v1.PodPhase
 		return ready, nil
 	})
 	if err != nil && strings.Contains(err.Error(), TimeOutMessage) {
+		logEventsOfNotReadyPods(ctx, podNotReadyCache, phase)
 		return fmt.Errorf("[Wait time out]: %s", additionalError)
 	}
 	return err
+}
+
+func logEventsOfNotReadyPods(ctx *TestContext, podNotReadyCache map[string]*v1.Pod, phase []v1.PodPhase) {
+	for _, pod := range podNotReadyCache {
+		klog.Errorf("The pod <%s/%s> is not in %v phase", pod.Namespace, pod.Name, phase)
+		// Currently, we only filter Failed event
+		fieldSelector := fmt.Sprintf("involvedObject.kind=Pod,involvedObject.name=%s,reason=Failed", pod.Name)
+		events, err := ctx.Kubeclient.CoreV1().Events(pod.Namespace).List(context.TODO(), metav1.ListOptions{
+			FieldSelector: fieldSelector,
+		})
+		Expect(err).NotTo(HaveOccurred(), "failed to get events related with pod %s in namespace %s", pod.Name, pod.Namespace)
+		for _, event := range events.Items {
+			klog.Errorf("Event related with pod <%s/%s>: Reason: %s, Message: %s", pod.Namespace, pod.Name, event.Reason, event.Message)
+		}
+	}
 }
 
 func taskPhaseEx(ctx *TestContext, job *batchv1alpha1.Job, phase []v1.PodPhase, taskNum map[string]int) error {
@@ -334,7 +372,8 @@ func jobUnschedulable(ctx *TestContext, job *batchv1alpha1.Job, now time.Time) e
 	var additionalError error
 	// TODO(k82cn): check Job's Condition instead of PodGroup's event.
 	err := wait.Poll(10*time.Second, FiveMinute, func() (bool, error) {
-		pg, err := ctx.Vcclient.SchedulingV1beta1().PodGroups(job.Namespace).Get(context.TODO(), job.Name, metav1.GetOptions{})
+		pgName := job.Name + "-" + string(job.UID)
+		pg, err := ctx.Vcclient.SchedulingV1beta1().PodGroups(job.Namespace).Get(context.TODO(), pgName, metav1.GetOptions{})
 		if err != nil {
 			additionalError = fmt.Errorf("expected to have job's podgroup %s created, actual got error %s",
 				job.Name, err.Error())
@@ -368,7 +407,8 @@ func jobUnschedulable(ctx *TestContext, job *batchv1alpha1.Job, now time.Time) e
 func JobEvicted(ctx *TestContext, job *batchv1alpha1.Job, time time.Time) wait.ConditionFunc {
 	// TODO(k82cn): check Job's conditions instead of PodGroup's event.
 	return func() (bool, error) {
-		pg, err := ctx.Vcclient.SchedulingV1beta1().PodGroups(job.Namespace).Get(context.TODO(), job.Name, metav1.GetOptions{})
+		pgName := job.Name + "-" + string(job.UID)
+		pg, err := ctx.Vcclient.SchedulingV1beta1().PodGroups(job.Namespace).Get(context.TODO(), pgName, metav1.GetOptions{})
 		Expect(err).NotTo(HaveOccurred(), "failed to get pod group of job %s in namespace %s", job.Name, job.Namespace)
 
 		events, err := ctx.Kubeclient.CoreV1().Events(pg.Namespace).List(context.TODO(), metav1.ListOptions{})
@@ -401,7 +441,7 @@ func WaitJobPhases(ctx *TestContext, job *batchv1alpha1.Job, phases []batchv1alp
 
 	ch := w.ResultChan()
 	index := 0
-	timeout := time.After(FiveMinute)
+	timeout := time.After(TenMinute)
 
 	for index < len(phases) {
 		select {
@@ -449,7 +489,7 @@ func WaitJobPhases(ctx *TestContext, job *batchv1alpha1.Job, phases []batchv1alp
 			}
 
 			index++
-			timeout = time.After(FiveMinute)
+			timeout = time.After(TenMinute)
 
 		case <-timeout:
 			return fmt.Errorf("[Wait time out]: %s", additionalError)
@@ -638,7 +678,8 @@ func WaitJobCleanedUp(ctx *TestContext, cleanupjob *batchv1alpha1.Job) error {
 			return false, nil
 		}
 
-		pg, err := ctx.Vcclient.SchedulingV1beta1().PodGroups(cleanupjob.Namespace).Get(context.TODO(), cleanupjob.Name, metav1.GetOptions{})
+		pgName := cleanupjob.Name + "-" + string(cleanupjob.UID)
+		pg, err := ctx.Vcclient.SchedulingV1beta1().PodGroups(cleanupjob.Namespace).Get(context.TODO(), pgName, metav1.GetOptions{})
 		if err != nil && !errors.IsNotFound(err) {
 			return false, nil
 		}
@@ -786,4 +827,24 @@ func WaitTasksCompleted(ctx *TestContext, job *batchv1alpha1.Job, successNum int
 		return fmt.Errorf("[Wait time out]: %s", additionalError)
 	}
 	return err
+}
+
+// Remove the scheduling gates (if any) of the tasks of a job at Pod level
+func RemovePodSchGates(ctx *TestContext, targetJob *batchv1alpha1.Job) error {
+
+	patchData := []byte(`[
+		{
+			"op": "replace",
+			"path": "/spec/schedulingGates",
+			"value": []
+		}
+	]`)
+
+	for _, pod := range GetTasksOfJob(ctx, targetJob) {
+		_, err := ctx.Kubeclient.CoreV1().Pods(targetJob.Namespace).Patch(context.TODO(), pod.Name, types.JSONPatchType, patchData, metav1.PatchOptions{})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
